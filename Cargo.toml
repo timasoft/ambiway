@@ -1,0 +1,15 @@
+[package]
+name = "ambiway"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+futures = "0.3.31"
+opencv = { version = "0.95.0", default-features = false, features = [
+    "clang-runtime",
+    "videoio",
+] }
+openrgb = "0.1.2"
+rgb = "0.8.51"
+tokio = {"version" = "1.46.1", features = ["full"]}
+xrandr = "0.2.0"

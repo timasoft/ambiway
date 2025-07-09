@@ -1,6 +1,6 @@
 use std::time;
 use std::thread;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
 use opencv::prelude::*;
 use opencv::{videoio, core};
 use xrandr::XHandle;
@@ -35,20 +35,17 @@ use openrgb::OpenRGB;
 //     }
 // }
 
-const BRIGHTNESS: f32 = 0.5;
-
 pub type Color = RGB8;
 
-struct VideoCaptureAsync {
+pub struct VideoCaptureAsync {
     shared: Arc<Mutex<Shared>>,
     handle: Option<thread::JoinHandle<()>>,
+    running: Arc<AtomicBool>, // Атомарный флаг для управления потоком
 }
 
 struct Shared {
-    cap: videoio::VideoCapture,
-    frame: Mat,
-    ret: bool,
-    running: bool,
+    frame: Arc<Mat>, // Кадр в Arc для быстрого клонирования
+    ret: bool,       // Статус последнего чтения
 }
 
 #[derive(Debug)]
@@ -68,59 +65,67 @@ impl VideoCaptureAsync {
         let ret = cap.read(&mut frame)?;
 
         let shared = Arc::new(Mutex::new(Shared {
-            cap,
-            frame,
+            frame: Arc::new(frame), // Начальный кадр в Arc
             ret,
-            running: true,
         }));
 
+        let running = Arc::new(AtomicBool::new(true));
+        let thread_running = Arc::clone(&running);
         let thread_shared = Arc::clone(&shared);
+
         let handle = thread::spawn(move || {
-            let sleep_duration = time::Duration::from_millis(10);
             loop {
-                {
-                    let mut s = thread_shared.lock().unwrap();
-                    if !s.running {
-                        break;
+                // Проверяем флаг без блокировки мьютекса
+                if !thread_running.load(Ordering::Relaxed) {
+                    break;
+                }
+
+                // Читаем кадр БЕЗ блокировки мьютекса
+                let mut mat = Mat::default();
+                let ret = cap.read(&mut mat);
+
+                // Проверяем флаг после чтения
+                if !thread_running.load(Ordering::Relaxed) {
+                    break;
+                }
+
+                let mut s = match thread_shared.lock() {
+                    Ok(guard) => guard,
+                    Err(_) => break, // Если мьютекст отравлен
+                };
+
+                match ret {
+                    Ok(r) => {
+                        s.ret = r;
+                        if r {
+                            // Обновляем кадр (быстрое создание Arc)
+                            s.frame = Arc::new(mat);
+                        }
                     }
-                    let mut mat = Mat::default();
-                    match s.cap.read(&mut mat) {
-                        Ok(r) => {
-                            s.ret = r;
-                            if r {
-                                s.frame = mat;
-                            }
-                        }
-                        Err(e) => {
-                            eprintln!("Error reading frame: {}", e);
-                        }
+                    Err(e) => {
+                        eprintln!("Error reading frame: {}", e);
+                        s.ret = false; // Важно: обновляем статус!
                     }
                 }
-                thread::sleep(sleep_duration);
             }
         });
 
         Ok(VideoCaptureAsync {
             shared,
             handle: Some(handle),
+            running,
         })
     }
 
-    fn read(&self) -> opencv::Result<(bool, Mat)> {
-        let start = time::Instant::now();
+    fn read(&self) -> opencv::Result<(bool, Arc<Mat>)> {
         let s = self.shared.lock().unwrap();
-        let elapsed = start.elapsed();
-        println!("Elapsed: {:?}", elapsed);
-        Ok((s.ret, s.frame.try_clone()?))
+        Ok((s.ret, s.frame.clone())) // Клонирование Arc (дешево)
     }
 
     fn stop(&mut self) {
-        {
-            let mut s = self.shared.lock().unwrap();
-            s.running = false;
-        }
+        self.running.store(false, Ordering::Relaxed); // Сигнал потоку на остановку
         if let Some(handle) = self.handle.take() {
-            handle.join().unwrap();
+            handle.join().unwrap(); // Ожидание завершения потока
         }
     }
 }
@@ -164,11 +169,11 @@ fn get_monitors_info() -> Result<Vec<MonitorRes>, Box<dyn std::error::Error>> {
     Ok(info)
 }
 
-fn round_rgb(r: f32, g: f32, b: f32) -> [u8; 3] {
+fn round_rgb(r: f32, g: f32, b: f32, brightness: f32) -> [u8; 3] {
     [
-        (r * BRIGHTNESS).round() as u8,
-        (g * BRIGHTNESS).round() as u8,
-        (b * BRIGHTNESS).round() as u8,
+        (r * brightness).round() as u8,
+        (g * brightness).round() as u8,
+        (b * brightness).round() as u8,
     ]
 }
 
@@ -186,6 +191,7 @@ fn get_average_colors(
     regions: &[[i32;4]],
     cap: &VideoCaptureAsync,
     previous_avg_colors: &[[u8;3]],
+    brightness: f32,
 ) -> Result<Vec<[u8;3]>, Box<dyn std::error::Error>> {
     let (ret, img) = cap.read()?;
     if !ret {
@@ -199,7 +205,7 @@ fn get_average_colors(
         let x2 = region[2]; let y2 = region[3];
 
         // вырезаем ROI:
-        let roi = Mat::roi(&img, core::Rect::new(x1, y1, x2-x1, y2-y1))?;
+        let roi = Mat::roi(img.as_ref(), core::Rect::new(x1, y1, x2-x1, y2-y1))?;
 
         // mean возвращает Scalar(B, G, R, A)
         let mean = core::mean(&roi, &core::no_array())?;
@@ -207,7 +213,7 @@ fn get_average_colors(
         let g = mean[1] as f32;
         let r = mean[2] as f32;
 
-        let rounded = round_rgb(r, g, b);
+        let rounded = round_rgb(r, g, b, brightness);
 
         let avg = if previous_avg_colors.is_empty() {
             average_rgb([0, 0, 0], rounded)
@@ -330,7 +336,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let up_indent = vec![0,40];
     let right_indent = vec![0,0];
     let down_indent = vec![0,0];
-    let size = 50;
+    let size: i32 = 50;
+    let brightness: f32 = 0.5;
 
     let monitors = get_monitors_info()?;
 
@@ -364,7 +371,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .map(|(i, regions)| {
                 let cap = &caps[i];
                 let prev = &avg_colors[i];
-                get_average_colors(regions, cap, prev)
+                get_average_colors(regions, cap, prev, brightness)
             })
             .collect();
 

@@ -7,7 +7,6 @@ use xrandr::XHandle;
 use rgb::RGB8;
 use tokio::net::TcpStream;
 use openrgb::OpenRGB;
-use futures::future::join_all;
 
 // struct VideoCaptureAsync {
 // 	cap: videoio::VideoCapture,
@@ -108,7 +107,10 @@ impl VideoCaptureAsync {
     }
 
     fn read(&self) -> opencv::Result<(bool, Mat)> {
+        let start = time::Instant::now();
         let s = self.shared.lock().unwrap();
+        let elapsed = start.elapsed();
+        println!("Elapsed: {:?}", elapsed);
         Ok((s.ret, s.frame.try_clone()?))
     }
 
@@ -378,8 +380,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Отправляем данные
         // println!("{:#?}", flat);
 
-        send_data(&client, &flat);
-        std::thread::sleep(time::Duration::from_millis(10));
+        send_data(&client, &flat).await?;
+
+        // Отправляем данные
+        // tokio::spawn(send_data(&client, &flat));
+
+        // Ожидаем 10 миллисекунд
+        tokio::time::sleep(time::Duration::from_millis(10)).await;
     }
 
     // caps будут остановлены автоматически при drop

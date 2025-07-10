@@ -1,5 +1,7 @@
 use std::time;
 use std::thread;
+use std::path::PathBuf;
+use std::fs;
 use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
 use opencv::prelude::*;
 use opencv::{videoio, core};
@@ -7,33 +9,38 @@ use xrandr::XHandle;
 use rgb::RGB8;
 use tokio::net::TcpStream;
 use openrgb::OpenRGB;
+use serde::Deserialize;
+use directories::ProjectDirs;
 
-// struct VideoCaptureAsync {
-// 	cap: videoio::VideoCapture,
-//     ret: bool,
-//     frame: Mat,
-//     running: bool,
-// }
-//
-// impl VideoCaptureAsync {
-//     fn new(source: i32) -> Self {
-//         let mut cap = videoio::VideoCapture::new(source, videoio::CAP_ANY).unwrap();
-//         let ret = false;
-//         let frame = Mat::default();
-//         let running = true;
-//     }
-//
-//     fn update(&mut self) -> Result<()> {
-//         loop {
-//             let mut frame = Mat::default();
-//             let ret = self.cap.read(&mut frame).unwrap();
-//             self.ret = ret;
-//             if ret {
-//                 self.frame = frame;
-//             }
-//         }
-//     }
-// }
+#[derive(Debug, Deserialize)]
+struct Config {
+    led: Led,
+    indent: Indent,
+    settings: Settings,
+}
+
+#[derive(Debug, Deserialize)]
+struct Led {
+    left: Vec<i32>,
+    up: Vec<i32>,
+    right: Vec<i32>,
+    down: Vec<i32>,
+}
+
+#[derive(Debug, Deserialize)]
+struct Indent {
+    left: Vec<i32>,
+    up: Vec<i32>,
+    right: Vec<i32>,
+    down: Vec<i32>,
+}
+
+#[derive(Debug, Deserialize)]
+struct Settings {
+    size: i32,
+    brightness: f32,
+    cams: Vec<i32>,
+}
 
 pub type Color = RGB8;
 
@@ -137,23 +144,6 @@ impl Drop for VideoCaptureAsync {
     }
 }
 
-// fn get_monitors_info() -> Result<Vec<HashMap<String, i32>>, Box<dyn std::error::Error>> {
-//     // Подключаемся к X серверу
-//     let mut xh = XHandle::open()?;
-//     // Получаем информацию о мониторах
-//     let monitors = xh.monitors()?;
-//
-//     // Собираем результат
-//     let info = monitors.iter().map(|m| {
-//         let mut map = HashMap::new();
-//         map.insert("width".to_string(), m.width_px);
-//         map.insert("height".to_string(), m.height_px);
-//         map
-//     }).collect();
-//
-//     Ok(info)
-// }
-
 fn get_monitors_info() -> Result<Vec<MonitorRes>, Box<dyn std::error::Error>> {
     // Подключаемся к X серверу
     let mut xh = XHandle::open()?;
@@ -169,6 +159,18 @@ fn get_monitors_info() -> Result<Vec<MonitorRes>, Box<dyn std::error::Error>> {
     Ok(info)
 }
 
+fn load_config() -> Config {
+    let config_path = get_config_path().expect("Failed to get config path");
+    let config_str = fs::read_to_string(&config_path)
+        .unwrap_or_else(|_| panic!("Failed to read config file: {:?}", config_path));
+    toml::from_str(&config_str).expect("Failed to parse config TOML")
+}
+
+fn get_config_path() -> Option<PathBuf> {
+    let proj_dirs = ProjectDirs::from("com", "timasoft", "ambiway")?;
+    Some(proj_dirs.config_dir().join("config.toml"))
+}
+
 fn round_rgb(r: f32, g: f32, b: f32, brightness: f32) -> [u8; 3] {
     [
         (r * brightness).round() as u8,
@@ -177,7 +179,6 @@ fn round_rgb(r: f32, g: f32, b: f32, brightness: f32) -> [u8; 3] {
     ]
 }
 
-// Функция для усреднения двух RGB‑цветов.
 fn average_rgb(rgb1: [u8; 3], rgb2: [u8; 3]) -> [u8; 3] {
     [
         ((rgb1[0] as u16 + rgb2[0] as u16) / 2) as u8,
@@ -185,7 +186,6 @@ fn average_rgb(rgb1: [u8; 3], rgb2: [u8; 3]) -> [u8; 3] {
         ((rgb1[2] as u16 + rgb2[2] as u16) / 2) as u8,
     ]
 }
-
 
 fn get_average_colors(
     regions: &[[i32;4]],
@@ -328,16 +328,34 @@ async fn send_data(
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let left_led = vec![36,41];
-    let up_led = vec![62,76];
-    let right_led = vec![36,42];
-    let down_led = vec![62,81];
-    let left_indent = vec![0,0];
-    let up_indent = vec![0,40];
-    let right_indent = vec![0,0];
-    let down_indent = vec![0,0];
-    let size: i32 = 50;
-    let brightness: f32 = 0.5;
+    let config = load_config();
+
+    let left_led = config.led.left;
+    let up_led = config.led.up;
+    let right_led = config.led.right;
+    let down_led = config.led.down;
+
+    let left_indent = config.indent.left;
+    let up_indent = config.indent.up;
+    let right_indent = config.indent.right;
+    let down_indent = config.indent.down;
+
+    let size = config.settings.size;
+    let brightness = config.settings.brightness;
+    let cams = config.settings.cams;
+
+    // let left_led = vec![36,41];
+    // let up_led = vec![62,76];
+    // let right_led = vec![36,42];
+    // let down_led = vec![62,81];
+    // let left_indent = vec![0,0];
+    // let up_indent = vec![0,40];
+    // let right_indent = vec![0,0];
+    // let down_indent = vec![0,0];
+    // let size: i32 = 50;
+    // let brightness: f32 = 0.25;
+    // let cams = vec![2,3];
+
 
     let monitors = get_monitors_info()?;
 
@@ -357,7 +375,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut avg_colors: Vec<Vec<[u8; 3]>> = vec![Vec::new(); monitors.len()];
 
     let mut caps: Vec<VideoCaptureAsync> = Vec::new();
-    let cams = [2,3];
     for i in cams {
         caps.push(VideoCaptureAsync::new(i as i32)?);
     }
@@ -385,68 +402,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let flat: Vec<(u8, u8, u8)> = results.into_iter().flatten().map(|rgb| (rgb[0], rgb[1], rgb[2])).collect();
 
         // Отправляем данные
-        // println!("{:#?}", flat);
 
         send_data(&client, &flat).await?;
-
-        // Отправляем данные
-        // tokio::spawn(send_data(&client, &flat));
 
         // Ожидаем 10 миллисекунд
         tokio::time::sleep(time::Duration::from_millis(10)).await;
     }
-
-    // caps будут остановлены автоматически при drop
     Ok(())
 }
-
-// fn main() -> Result<(), Box<dyn std::error::Error>> {
-//     let left_led = vec![36,41];
-//     let up_led = vec![62,76];
-//     let right_led = vec![36,42];
-//     let down_led = vec![62,81];
-//     let left_indent = vec![0,0];
-//     let up_indent = vec![0,40];
-//     let right_indent = vec![0,0];
-//     let down_indent = vec![0,0];
-//     let size = 50;
-//
-//     let monitors = get_monitors_info()?;
-//
-//     let region_list = calculate_regions(
-//         &monitors,
-//         &left_led,
-//         &up_led,
-//         &right_led,
-//         &down_led,
-//         &left_indent,
-//         &up_indent,
-//         &right_indent,
-//         &down_indent,
-//         size,
-//     );
-//
-//     let mut avg_colors: Vec<Vec<(u8, u8, u8)>> = vec![Vec::new(); monitors.len()];
-//
-//     loop {
-//
-//     }
-// }
-
-// fn main() -> Result<(), Box<dyn std::error::Error>> {
-//     let mut cap = VideoCaptureAsync::new(0)?;
-//     let infos = get_monitors_info()?;
-//     println!("{:#?}", infos);
-//
-//     loop {
-//         let (ret, frame) = cap.read()?;
-//         if !ret {
-//             eprintln!("Failed to capture frame");
-//             break;
-//         }
-//     }
-//
-//     cap.stop();
-//     Ok(())
-// }
 

@@ -1,4 +1,4 @@
-### Example config (.config/ambiway/config.toml)
+### Example config (```.config/ambiway/config.toml```)
 ```toml
 [led]
 left = [36, 41]

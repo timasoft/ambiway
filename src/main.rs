@@ -344,18 +344,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let brightness = config.settings.brightness;
     let cams = config.settings.cams;
 
-    // let left_led = vec![36,41];
-    // let up_led = vec![62,76];
-    // let right_led = vec![36,42];
-    // let down_led = vec![62,81];
-    // let left_indent = vec![0,0];
-    // let up_indent = vec![0,40];
-    // let right_indent = vec![0,0];
-    // let down_indent = vec![0,0];
-    // let size: i32 = 50;
-    // let brightness: f32 = 0.25;
-    // let cams = vec![2,3];
-
+    println!("Loaded config: size = {}, brightness = {}", size, brightness);
 
     let monitors = get_monitors_info()?;
 

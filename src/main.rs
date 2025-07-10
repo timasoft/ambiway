@@ -47,12 +47,12 @@ pub type Color = RGB8;
 pub struct VideoCaptureAsync {
     shared: Arc<Mutex<Shared>>,
     handle: Option<thread::JoinHandle<()>>,
-    running: Arc<AtomicBool>, // Атомарный флаг для управления потоком
+    running: Arc<AtomicBool>, // Atomic bool for controlling thread
 }
 
 struct Shared {
-    frame: Arc<Mat>, // Кадр в Arc для быстрого клонирования
-    ret: bool,       // Статус последнего чтения
+    frame: Arc<Mat>, // Frame in Arc for fast cloning
+    ret: bool,       // Status of last read
 }
 
 #[derive(Debug)]
@@ -72,7 +72,7 @@ impl VideoCaptureAsync {
         let ret = cap.read(&mut frame)?;
 
         let shared = Arc::new(Mutex::new(Shared {
-            frame: Arc::new(frame), // Начальный кадр в Arc
+            frame: Arc::new(frame), // Initial frame in Arc
             ret,
         }));
 
@@ -82,36 +82,36 @@ impl VideoCaptureAsync {
 
         let handle = thread::spawn(move || {
             loop {
-                // Проверяем флаг без блокировки мьютекса
+                // Check the flag without locking the mutex
                 if !thread_running.load(Ordering::Relaxed) {
                     break;
                 }
 
-                // Читаем кадр БЕЗ блокировки мьютекса
+                // Read the frame without locking the mutex
                 let mut mat = Mat::default();
                 let ret = cap.read(&mut mat);
 
-                // Проверяем флаг после чтения
+                // Check the flag after reading
                 if !thread_running.load(Ordering::Relaxed) {
                     break;
                 }
 
                 let mut s = match thread_shared.lock() {
                     Ok(guard) => guard,
-                    Err(_) => break, // Если мьютекст отравлен
+                    Err(_) => break, // If mutex is poisoned
                 };
 
                 match ret {
                     Ok(r) => {
                         s.ret = r;
                         if r {
-                            // Обновляем кадр (быстрое создание Arc)
+                            // Update frame (fast creation of Arc)
                             s.frame = Arc::new(mat);
                         }
                     }
                     Err(e) => {
                         eprintln!("Error reading frame: {}", e);
-                        s.ret = false; // Важно: обновляем статус!
+                        s.ret = false; //Important: update status!
                     }
                 }
             }
@@ -126,13 +126,13 @@ impl VideoCaptureAsync {
 
     fn read(&self) -> opencv::Result<(bool, Arc<Mat>)> {
         let s = self.shared.lock().unwrap();
-        Ok((s.ret, s.frame.clone())) // Клонирование Arc (дешево)
+        Ok((s.ret, s.frame.clone())) // Cloning Arc (cheap)
     }
 
     fn stop(&mut self) {
-        self.running.store(false, Ordering::Relaxed); // Сигнал потоку на остановку
+        self.running.store(false, Ordering::Relaxed); // Signal thread to stop
         if let Some(handle) = self.handle.take() {
-            handle.join().unwrap(); // Ожидание завершения потока
+            handle.join().unwrap(); // Waiting for thread to finish
         }
     }
 }
@@ -140,16 +140,15 @@ impl VideoCaptureAsync {
 impl Drop for VideoCaptureAsync {
     fn drop(&mut self) {
         self.stop();
-        // VideoCapture освободится автоматически при drop
     }
 }
 
 fn get_monitors_info() -> Result<Vec<MonitorRes>, Box<dyn std::error::Error>> {
-    // Подключаемся к X серверу
+    // Create an XHandle instance
     let mut xh = XHandle::open()?;
-    // Получаем информацию о мониторах
+    // Get a list of monitors
     let monitors = xh.monitors()?;
-    // Собираем результат
+    // Collect the results
     let info = monitors.iter().map(|m| {
         MonitorRes {
             width: m.width_px,
@@ -204,10 +203,10 @@ fn get_average_colors(
         let x1 = region[0]; let y1 = region[1];
         let x2 = region[2]; let y2 = region[3];
 
-        // вырезаем ROI:
+        // Cut ROI from image
         let roi = Mat::roi(img.as_ref(), core::Rect::new(x1, y1, x2-x1, y2-y1))?;
 
-        // mean возвращает Scalar(B, G, R, A)
+        // mean returns Scalar(B, G, R, A)
         let mean = core::mean(&roi, &core::no_array())?;
         let b = mean[0] as f32;
         let g = mean[1] as f32;
@@ -241,13 +240,13 @@ fn calculate_regions(
     let mut regions_list = Vec::with_capacity(monitors.len());
 
     for (i, monitor) in monitors.iter().enumerate() {
-        // Основные размеры
+        // Main sizes
         let inner_width = monitor.width - left_indent[i] - right_indent[i];
         let inner_height = monitor.height - up_indent[i] - down_indent[i];
         let main_width = monitor.width;
         let main_height = monitor.height;
 
-        // Шаги между светодиодами
+        // Steps between LEDs
         let left_step = inner_height as f32 / left_led[i] as f32;
         let up_step = inner_width as f32 / up_led[i] as f32;
         let right_step = inner_height as f32 / right_led[i] as f32;
@@ -255,7 +254,7 @@ fn calculate_regions(
 
         let mut monitor_regions: Vec<[i32; 4]> = Vec::new();
 
-        // Левая сторона (снизу вверх)
+        // Left side (from bottom to top)
         {
             let mut b = down_indent[i];
             for a in 0..=left_led[i] {
@@ -267,7 +266,7 @@ fn calculate_regions(
             }
         }
 
-        // Верхняя сторона (слева направо)
+        // Top side (from left to right)
         {
             let mut b = left_indent[i];
             for a in 0..=up_led[i] {
@@ -279,7 +278,7 @@ fn calculate_regions(
             }
         }
 
-        // Правая сторона (сверху вниз)
+        // Right side (from top to bottom)
         {
             let mut b = up_indent[i];
             for a in 0..=right_led[i] {
@@ -291,7 +290,7 @@ fn calculate_regions(
             }
         }
 
-        // Нижняя сторона (справа налево)
+        // Bottom side (from right to left)
         {
             let mut b = right_indent[i];
             for a in 0..=down_led[i] {
@@ -313,14 +312,14 @@ async fn send_data(
     client: &OpenRGB<TcpStream>,
     data: &[(u8, u8, u8)],
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Чёрный первый, затем остальные из data
+    // Black first, then the rest of data
     let mut colors: Vec<RGB8> = Vec::with_capacity(data.len() + 1);
     colors.push(RGB8::new(0, 0, 0));
     for &(r, g, b) in data {
         colors.push(RGB8::new(r, g, b));
     }
 
-    // Отправляем на устройство
+    // Send data
     client.update_leds(0, colors).await?;
 
     Ok(())
@@ -383,18 +382,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let results: Vec<_> = tasks.into_iter().map(|r| r.unwrap_or_default()).collect();
 
-        // обновим avg_colors
+        // Update avg_colors
         for (i, res) in results.iter().enumerate() {
             avg_colors[i] = res.clone();
         }
 
         let flat: Vec<(u8, u8, u8)> = results.into_iter().flatten().map(|rgb| (rgb[0], rgb[1], rgb[2])).collect();
 
-        // Отправляем данные
-
         send_data(&client, &flat).await?;
 
-        // Ожидаем 10 миллисекунд
+        // Sleep 10 ms
         tokio::time::sleep(time::Duration::from_millis(10)).await;
     }
     Ok(())

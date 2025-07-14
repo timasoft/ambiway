@@ -1,11 +1,14 @@
 [package]
 name = "ambiway"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 
 [dependencies]
+clap = { version = "4.5.41", features = ["derive"] }
 directories = "6.0.0"
 futures = "0.3.31"
+glib = "0.20.12"
+gtk = { version = "0.9.7", package = "gtk4", features = ["v4_18"] }
 opencv = { version = "0.95.0", default-features = false, features = [
     "clang-runtime",
     "videoio",

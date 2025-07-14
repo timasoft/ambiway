@@ -1,16 +1,33 @@
-use std::time;
-use std::thread;
-use std::path::PathBuf;
-use std::fs;
-use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
-use opencv::prelude::*;
-use opencv::{videoio, core};
-use xrandr::XHandle;
-use rgb::RGB8;
-use tokio::net::TcpStream;
-use openrgb::OpenRGB;
-use serde::Deserialize;
+use clap::Parser;
 use directories::ProjectDirs;
+use opencv::prelude::*;
+use opencv::{core, videoio};
+use openrgb::OpenRGB;
+use rgb::RGB8;
+use serde::Deserialize;
+use std::fs;
+use std::path::PathBuf;
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
+use std::thread;
+use std::time;
+use tokio::net::TcpStream;
+use xrandr::XHandle;
+
+/// Ambilight with OpenRGB
+#[derive(Parser, Debug)]
+#[command(version, about, long_about = None)]
+struct Args {
+    /// Run in GUI mode
+    #[arg(short = 'g', long = "gui")]
+    gui: bool,
+
+    /// Set config file
+    #[arg(short = 'c', long = "config", value_name = "FILE")]
+    config: Option<PathBuf>,
+}
 
 #[derive(Debug, Deserialize)]
 struct Config {
@@ -149,12 +166,13 @@ fn get_monitors_info() -> Result<Vec<MonitorRes>, Box<dyn std::error::Error>> {
     // Get a list of monitors
     let monitors = xh.monitors()?;
     // Collect the results
-    let info = monitors.iter().map(|m| {
-        MonitorRes {
+    let info = monitors
+        .iter()
+        .map(|m| MonitorRes {
             width: m.width_px,
             height: m.height_px,
-        }
-    }).collect();
+        })
+        .collect();
     Ok(info)
 }
 
@@ -162,6 +180,12 @@ fn load_config() -> Config {
     let config_path = get_config_path().expect("Failed to get config path");
     let config_str = fs::read_to_string(&config_path)
         .unwrap_or_else(|_| panic!("Failed to read config file: {:?}", config_path));
+    toml::from_str(&config_str).expect("Failed to parse config TOML")
+}
+
+fn load_config_from_file(path: &PathBuf) -> Config {
+    let config_str = fs::read_to_string(path)
+        .unwrap_or_else(|_| panic!("Failed to read config file: {:?}", path));
     toml::from_str(&config_str).expect("Failed to parse config TOML")
 }
 
@@ -187,11 +211,11 @@ fn average_rgb(rgb1: [u8; 3], rgb2: [u8; 3]) -> [u8; 3] {
 }
 
 fn get_average_colors(
-    regions: &[[i32;4]],
+    regions: &[[i32; 4]],
     cap: &VideoCaptureAsync,
-    previous_avg_colors: &[[u8;3]],
+    previous_avg_colors: &[[u8; 3]],
     brightness: f32,
-) -> Result<Vec<[u8;3]>, Box<dyn std::error::Error>> {
+) -> Result<Vec<[u8; 3]>, Box<dyn std::error::Error>> {
     let (ret, img) = cap.read()?;
     if !ret {
         return Ok(vec![]);
@@ -200,11 +224,13 @@ fn get_average_colors(
     let mut avg_colors = Vec::with_capacity(regions.len());
 
     for (i, region) in regions.iter().enumerate() {
-        let x1 = region[0]; let y1 = region[1];
-        let x2 = region[2]; let y2 = region[3];
+        let x1 = region[0];
+        let y1 = region[1];
+        let x2 = region[2];
+        let y2 = region[3];
 
         // Cut ROI from image
-        let roi = Mat::roi(img.as_ref(), core::Rect::new(x1, y1, x2-x1, y2-y1))?;
+        let roi = Mat::roi(img.as_ref(), core::Rect::new(x1, y1, x2 - x1, y2 - y1))?;
 
         // mean returns Scalar(B, G, R, A)
         let mean = core::mean(&roi, &core::no_array())?;
@@ -296,7 +322,12 @@ fn calculate_regions(
             for a in 0..=down_led[i] {
                 let value = (down_step * a as f32).round() as i32 + right_indent[i];
                 if a > 0 {
-                    monitor_regions.push([inner_width - value, main_height - size, inner_width - b, main_height]);
+                    monitor_regions.push([
+                        inner_width - value,
+                        main_height - size,
+                        inner_width - b,
+                        main_height,
+                    ]);
                 }
                 b = value;
             }
@@ -327,7 +358,21 @@ async fn send_data(
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let config = load_config();
+    let args = Args::parse();
+
+    let config = match args.config {
+        Some(path) => {
+            println!("Using user config: {:?}", path);
+            load_config_from_file(&path)
+        }
+        None => load_config(),
+    };
+
+    // Process GUI mode
+    if args.gui {
+        println!("Not implemented yet");
+        return Ok(());
+    }
 
     let left_led = config.led.left;
     let up_led = config.led.up;
@@ -343,7 +388,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let brightness = config.settings.brightness;
     let cams = config.settings.cams;
 
-    println!("Loaded config: size = {}, brightness = {}", size, brightness);
+    println!(
+        "Loaded config: size = {}, brightness = {}",
+        size, brightness
+    );
 
     let monitors = get_monitors_info()?;
 
@@ -387,13 +435,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             avg_colors[i] = res.clone();
         }
 
-        let flat: Vec<(u8, u8, u8)> = results.into_iter().flatten().map(|rgb| (rgb[0], rgb[1], rgb[2])).collect();
+        let flat: Vec<(u8, u8, u8)> = results
+            .into_iter()
+            .flatten()
+            .map(|rgb| (rgb[0], rgb[1], rgb[2]))
+            .collect();
 
         send_data(&client, &flat).await?;
 
         // Sleep 10 ms
         tokio::time::sleep(time::Duration::from_millis(10)).await;
     }
-    Ok(())
 }
-

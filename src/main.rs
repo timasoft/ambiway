@@ -46,10 +46,15 @@ struct Led {
 
 #[derive(Debug, Deserialize)]
 struct Indent {
-    left: Vec<i32>,
-    up: Vec<i32>,
-    right: Vec<i32>,
-    down: Vec<i32>,
+    left_up: Vec<i32>,
+    left_down: Vec<i32>,
+    up_left: Vec<i32>,
+    up_right: Vec<i32>,
+    right_up: Vec<i32>,
+    right_down: Vec<i32>,
+    down_left: Vec<i32>,
+    down_right: Vec<i32>,
+
 }
 
 #[derive(Debug, Deserialize)]
@@ -257,36 +262,42 @@ fn calculate_regions(
     up_led: &[i32],
     right_led: &[i32],
     down_led: &[i32],
-    left_indent: &[i32],
-    up_indent: &[i32],
-    right_indent: &[i32],
-    down_indent: &[i32],
+    left_up_indent: &[i32],
+    left_down_indent: &[i32],
+    up_left_indent: &[i32],
+    up_right_indent: &[i32],
+    right_up_indent: &[i32],
+    right_down_indent: &[i32],
+    down_left_indent: &[i32],
+    down_right_indent: &[i32],
     size: i32,
 ) -> Vec<Vec<[i32; 4]>> {
     let mut regions_list = Vec::with_capacity(monitors.len());
 
     for (i, monitor) in monitors.iter().enumerate() {
         // Main sizes
-        let inner_width = monitor.width - left_indent[i] - right_indent[i];
-        let inner_height = monitor.height - up_indent[i] - down_indent[i];
+        let inner_width_up = monitor.width - up_left_indent[i] - up_right_indent[i];
+        let inner_width_down = monitor.width - down_left_indent[i] - down_right_indent[i];
+        let inner_height_left = monitor.height - left_up_indent[i] - left_down_indent[i];
+        let inner_height_right = monitor.height - right_up_indent[i] - right_down_indent[i];
         let main_width = monitor.width;
         let main_height = monitor.height;
 
         // Steps between LEDs
-        let left_step = inner_height as f32 / left_led[i] as f32;
-        let up_step = inner_width as f32 / up_led[i] as f32;
-        let right_step = inner_height as f32 / right_led[i] as f32;
-        let down_step = inner_width as f32 / down_led[i] as f32;
+        let left_step = inner_height_left as f32 / left_led[i] as f32;
+        let up_step = inner_width_up as f32 / up_led[i] as f32;
+        let right_step = inner_height_right as f32 / right_led[i] as f32;
+        let down_step = inner_width_down as f32 / down_led[i] as f32;
 
         let mut monitor_regions: Vec<[i32; 4]> = Vec::new();
 
         // Left side (from bottom to top)
         {
-            let mut b = down_indent[i];
+            let mut b = left_down_indent[i];
             for a in 0..=left_led[i] {
-                let value = (left_step * a as f32).round() as i32 + down_indent[i];
+                let value = (left_step * a as f32).round() as i32 + left_down_indent[i];
                 if a > 0 {
-                    monitor_regions.push([0, inner_height - value, size, inner_height - b]);
+                    monitor_regions.push([0, inner_height_left - value + left_up_indent[i], size, inner_height_left - b + left_up_indent[i]]);
                 }
                 b = value;
             }
@@ -294,9 +305,9 @@ fn calculate_regions(
 
         // Top side (from left to right)
         {
-            let mut b = left_indent[i];
+            let mut b = up_left_indent[i];
             for a in 0..=up_led[i] {
-                let value = (up_step * a as f32).round() as i32 + left_indent[i];
+                let value = (up_step * a as f32).round() as i32 + up_left_indent[i];
                 if a > 0 {
                     monitor_regions.push([b, 0, value, size]);
                 }
@@ -306,9 +317,9 @@ fn calculate_regions(
 
         // Right side (from top to bottom)
         {
-            let mut b = up_indent[i];
+            let mut b = right_up_indent[i];
             for a in 0..=right_led[i] {
-                let value = (right_step * a as f32).round() as i32 + up_indent[i];
+                let value = (right_step * a as f32).round() as i32 + right_up_indent[i];
                 if a > 0 {
                     monitor_regions.push([main_width - size, b, main_width, value]);
                 }
@@ -318,14 +329,14 @@ fn calculate_regions(
 
         // Bottom side (from right to left)
         {
-            let mut b = right_indent[i];
+            let mut b = down_right_indent[i];
             for a in 0..=down_led[i] {
-                let value = (down_step * a as f32).round() as i32 + right_indent[i];
+                let value = (down_step * a as f32).round() as i32 + down_right_indent[i];
                 if a > 0 {
                     monitor_regions.push([
-                        inner_width - value,
+                        inner_width_down - value + down_left_indent[i],
                         main_height - size,
-                        inner_width - b,
+                        inner_width_down - b + down_left_indent[i],
                         main_height,
                     ]);
                 }
@@ -374,16 +385,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    let left_led = config.led.left;
-    let up_led = config.led.up;
-    let right_led = config.led.right;
-    let down_led = config.led.down;
-
-    let left_indent = config.indent.left;
-    let up_indent = config.indent.up;
-    let right_indent = config.indent.right;
-    let down_indent = config.indent.down;
-
     let size = config.settings.size;
     let brightness = config.settings.brightness;
     let cams = config.settings.cams;
@@ -397,14 +398,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let region_list = calculate_regions(
         &monitors,
-        &left_led,
-        &up_led,
-        &right_led,
-        &down_led,
-        &left_indent,
-        &up_indent,
-        &right_indent,
-        &down_indent,
+        &config.led.left,
+        &config.led.up,
+        &config.led.right,
+        &config.led.down,
+        &config.indent.left_up,
+        &config.indent.left_down,
+        &config.indent.up_left,
+        &config.indent.up_right,
+        &config.indent.right_up,
+        &config.indent.right_down,
+        &config.indent.down_left,
+        &config.indent.down_right,
         size,
     );
 
@@ -412,7 +417,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut caps: Vec<VideoCaptureAsync> = Vec::new();
     for i in cams {
-        caps.push(VideoCaptureAsync::new(i as i32)?);
+        caps.push(VideoCaptureAsync::new(i)?);
     }
 
     let client = OpenRGB::connect().await?;

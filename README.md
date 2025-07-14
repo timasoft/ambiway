@@ -7,12 +7,17 @@ right = [36, 42]
 down = [62, 81]
 
 [indent]
-left = [0, 0]
-up = [0, 40]
-right = [0, 0]
-down = [0, 0]
+left_up = [0, 40]
+left_down = [0, 0]
+up_left = [0, 0]
+up_right = [0, 0]
+right_up = [0, 40]
+right_down = [0, 0]
+down_left = [0, 0]
+down_right = [0, 0]
 
 [settings]
 size = 50
 brightness = 0.25
+cams = [2, 3]
 ```

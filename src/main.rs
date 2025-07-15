@@ -1,18 +1,13 @@
 use clap::Parser;
 use directories::ProjectDirs;
 use opencv::prelude::*;
-use opencv::{core, videoio};
 use opencv::videoio::VideoCapture;
+use opencv::{core, videoio};
 use openrgb::OpenRGB;
 use rgb::RGB8;
 use serde::Deserialize;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::{
-    Arc, Mutex,
-    atomic::{AtomicBool, Ordering},
-};
-use std::thread;
 use std::time;
 use tokio::net::TcpStream;
 use tokio::runtime::Builder;
@@ -56,7 +51,6 @@ struct Indent {
     right_down: Vec<i32>,
     down_left: Vec<i32>,
     down_right: Vec<i32>,
-
 }
 
 #[derive(Debug, Deserialize)]
@@ -96,13 +90,13 @@ fn get_monitors_info() -> Result<Vec<MonitorRes>, Box<dyn std::error::Error>> {
 fn load_config() -> Config {
     let config_path = get_config_path().expect("Failed to get config path");
     let config_str = fs::read_to_string(&config_path)
-        .unwrap_or_else(|_| panic!("Failed to read config file: {:?}", config_path));
+        .unwrap_or_else(|_| panic!("Failed to read config file: {config_path:?}"));
     toml::from_str(&config_str).expect("Failed to parse config TOML")
 }
 
 fn load_config_from_file(path: &PathBuf) -> Config {
     let config_str = fs::read_to_string(path)
-        .unwrap_or_else(|_| panic!("Failed to read config file: {:?}", path));
+        .unwrap_or_else(|_| panic!("Failed to read config file: {path:?}"));
     toml::from_str(&config_str).expect("Failed to parse config TOML")
 }
 
@@ -214,7 +208,12 @@ fn calculate_regions(
             for a in 0..=left_led[i] {
                 let value = (left_step * a as f32).round() as i32 + left_down_indent[i];
                 if a > 0 {
-                    monitor_regions.push([0, inner_height_left - value + left_up_indent[i], size, inner_height_left - b + left_up_indent[i]]);
+                    monitor_regions.push([
+                        0,
+                        inner_height_left - value + left_up_indent[i],
+                        size,
+                        inner_height_left - b + left_up_indent[i],
+                    ]);
                 }
                 b = value;
             }
@@ -291,7 +290,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let config = match args.config {
         Some(path) => {
-            println!("Using user config: {:?}", path);
+            println!("Using user config: {path:?}", );
             load_config_from_file(&path)
         }
         None => load_config(),
@@ -310,10 +309,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let device_id = config.settings.device_id;
     let zone_id_list = config.settings.zone_id_list;
 
-    println!(
-        "Loaded config: size = {}, brightness = {}",
-        size, brightness
-    );
+    println!("Loaded config: size = {size}, brightness = {brightness}");
 
     let monitors = get_monitors_info()?;
 
@@ -345,8 +341,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut handles = Vec::with_capacity(cams.len());
         for (i, &cam) in cams.iter().enumerate() {
             let region = region_list[i].clone();
-            let device_id = device_id.clone();
-            let zone_id = zone_id_list[i].clone();
+            let device_id = device_id;
+            let zone_id = zone_id_list[i];
             let brightness = brightness;
             let client = OpenRGB::connect().await.unwrap();
 
@@ -354,19 +350,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 tokio::task::spawn_blocking(move || {
                     let mut cap = VideoCapture::new(cam, videoio::CAP_V4L2).unwrap();
                     if !cap.is_opened().unwrap() {
-                        panic!("Can't open camera {}", cam);
+                        panic!("Can't open camera {cam}");
                     }
                     let mut avg_colors = Vec::new();
                     loop {
-                        let start = time::Instant::now();
                         let prev = &avg_colors;
                         let res = get_average_colors(&region, &mut cap, prev, brightness, smooth)
                             .unwrap_or_default();
                         avg_colors = res.clone();
-                        tokio::runtime::Handle::current().block_on(
-                            send_data(&client, &res, device_id.clone(), zone_id.clone())
-                        );
-                        println!("elapsed: {:?}", start.elapsed());
+                        tokio::runtime::Handle::current().block_on(send_data(
+                            &client,
+                            &res,
+                            device_id,
+                            zone_id,
+                        )).expect("Failed to send data");
                         std::thread::sleep(time::Duration::from_millis(45));
                     }
                 })
@@ -381,5 +378,4 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     Ok(())
-
 }

@@ -2,6 +2,7 @@ use clap::Parser;
 use directories::ProjectDirs;
 use opencv::prelude::*;
 use opencv::{core, videoio};
+use opencv::videoio::VideoCapture;
 use openrgb::OpenRGB;
 use rgb::RGB8;
 use serde::Deserialize;
@@ -14,6 +15,7 @@ use std::sync::{
 use std::thread;
 use std::time;
 use tokio::net::TcpStream;
+use tokio::runtime::Builder;
 use xrandr::XHandle;
 
 /// Ambilight with OpenRGB
@@ -62,6 +64,8 @@ struct Settings {
     size: i32,
     brightness: f32,
     cams: Vec<i32>,
+    device_id: u32,
+    zone_id_list: Vec<u32>,
 }
 
 pub type Color = RGB8;
@@ -217,11 +221,12 @@ fn average_rgb(rgb1: [u8; 3], rgb2: [u8; 3]) -> [u8; 3] {
 
 fn get_average_colors(
     regions: &[[i32; 4]],
-    cap: &VideoCaptureAsync,
+    cap: &mut VideoCapture,
     previous_avg_colors: &[[u8; 3]],
     brightness: f32,
 ) -> Result<Vec<[u8; 3]>, Box<dyn std::error::Error>> {
-    let (ret, img) = cap.read()?;
+    let mut img = Mat::default();
+    let ret = cap.read(&mut img)?;
     if !ret {
         return Ok(vec![]);
     }
@@ -235,7 +240,7 @@ fn get_average_colors(
         let y2 = region[3];
 
         // Cut ROI from image
-        let roi = Mat::roi(img.as_ref(), core::Rect::new(x1, y1, x2 - x1, y2 - y1))?;
+        let roi = Mat::roi(&img, core::Rect::new(x1, y1, x2 - x1, y2 - y1))?;
 
         // mean returns Scalar(B, G, R, A)
         let mean = core::mean(&roi, &core::no_array())?;
@@ -352,23 +357,24 @@ fn calculate_regions(
 
 async fn send_data(
     client: &OpenRGB<TcpStream>,
-    data: &[(u8, u8, u8)],
+    data: &Vec<[u8; 3]>,
+    device_id: u32,
+    zone_id: u32,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Black first, then the rest of data
-    let mut colors: Vec<RGB8> = Vec::with_capacity(data.len() + 1);
-    colors.push(RGB8::new(0, 0, 0));
-    for &(r, g, b) in data {
-        colors.push(RGB8::new(r, g, b));
+    let mut colors: Vec<RGB8> = Vec::with_capacity(data.len());
+
+    for rgb in data {
+        colors.push(RGB8::new(rgb[0], rgb[1], rgb[2]));
     }
 
     // Send data
-    client.update_leds(0, colors).await?;
+    client.update_zone_leds(device_id, zone_id, colors).await?;
 
     Ok(())
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
     let config = match args.config {
@@ -388,6 +394,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let size = config.settings.size;
     let brightness = config.settings.brightness;
     let cams = config.settings.cams;
+    let device_id = config.settings.device_id;
+    let zone_id_list = config.settings.zone_id_list;
 
     println!(
         "Loaded config: size = {}, brightness = {}",
@@ -413,42 +421,134 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         size,
     );
 
-    let mut avg_colors: Vec<Vec<[u8; 3]>> = vec![Vec::new(); monitors.len()];
+    // let mut avg_colors: Vec<Vec<[u8; 3]>> = vec![Vec::new(); monitors.len()];
+    //
+    // let mut caps: Vec<VideoCaptureAsync> = Vec::new();
+    // for i in cams {
+    //     caps.push(VideoCaptureAsync::new(i)?);
+    // }
 
-    let mut caps: Vec<VideoCaptureAsync> = Vec::new();
-    for i in cams {
-        caps.push(VideoCaptureAsync::new(i)?);
-    }
+    // let client = OpenRGB::connect().await?;
 
-    let client = OpenRGB::connect().await?;
+    // let mut handles = Vec::with_capacity(cams.len());
+    // for (i, &cam) in cams.iter().enumerate() {
+    //     let region = region_list[i].clone();
+    //     let client = OpenRGB::connect().await?;
+    //     let device_id = device_id.clone();
+    //     let zone_id = zone_id_list[i].clone();
+    //     let brightness = brightness;
+    //
+    //     let handle = tokio::spawn(async move {
+    //         // CPU-тяжёлый код — в spawn_blocking
+    //         tokio::task::spawn_blocking(move || {
+    //             let mut cap = VideoCapture::new(cam, videoio::CAP_V4L2).unwrap();
+    //             if !cap.is_opened().unwrap() {
+    //                 panic!("Can't open camera {}", cam);
+    //             }
+    //
+    //             let mut avg_colors = Vec::new();
+    //             loop {
+    //                 let prev = &avg_colors;
+    //                 let res = get_average_colors(&region, &mut cap, prev, brightness)
+    //                     .unwrap_or_default();
+    //                 avg_colors = res.clone();
+    //                 // нужно вернуть `res` сюда для send
+    //                 avg_colors = res.clone();
+    //                 // отправка — асинхронная
+    //                 let send = async {
+    //                     send_data(&client, &res, device_id, zone_id).await.unwrap();
+    //                 };
+    //                 // ждем завершения send
+    //                 tokio::runtime::Handle::current().block_on(send);
+    //             }
+    //         })
+    //         .await
+    //         .unwrap();
+    //     });
+    //     handles.push(handle);
+    // }
+    //
+    // for h in handles {
+    //     let _ = h.await;
+    // }
+    //
 
-    loop {
-        let tasks: Vec<_> = region_list
-            .iter()
-            .enumerate()
-            .map(|(i, regions)| {
-                let cap = &caps[i];
-                let prev = &avg_colors[i];
-                get_average_colors(regions, cap, prev, brightness)
-            })
-            .collect();
+    let num_threads = cams.len().max(1);
+    let rt = Builder::new_multi_thread()
+        .worker_threads(num_threads)
+        .max_blocking_threads(num_threads) // можно регулировать отдельно
+        .enable_all()
+        .build()?;
 
-        let results: Vec<_> = tasks.into_iter().map(|r| r.unwrap_or_default()).collect();
+    rt.block_on(async move {
+        let mut handles = Vec::with_capacity(cams.len());
+        for (i, &cam) in cams.iter().enumerate() {
+            let region = region_list[i].clone();
+            let device_id = device_id.clone();
+            let zone_id = zone_id_list[i].clone();
+            let brightness = brightness;
+            let client = OpenRGB::connect().await.unwrap();
 
-        // Update avg_colors
-        for (i, res) in results.iter().enumerate() {
-            avg_colors[i] = res.clone();
+            handles.push(tokio::spawn(async move {
+                tokio::task::spawn_blocking(move || {
+                    let mut cap = VideoCapture::new(cam, videoio::CAP_V4L2).unwrap();
+                    if !cap.is_opened().unwrap() {
+                        panic!("Can't open camera {}", cam);
+                    }
+                    let mut avg_colors = Vec::new();
+                    loop {
+                        let start = time::Instant::now();
+                        let prev = &avg_colors;
+                        let res = get_average_colors(&region, &mut cap, prev, brightness)
+                            .unwrap_or_default();
+                        avg_colors = res.clone();
+                        tokio::runtime::Handle::current().block_on(
+                            send_data(&client, &res, device_id.clone(), zone_id.clone())
+                        );
+                        println!("elapsed: {:?}", start.elapsed());
+                        std::thread::sleep(time::Duration::from_millis(45));
+                    }
+                })
+                .await
+                .unwrap();
+            }));
         }
 
-        let flat: Vec<(u8, u8, u8)> = results
-            .into_iter()
-            .flatten()
-            .map(|rgb| (rgb[0], rgb[1], rgb[2]))
-            .collect();
+        for h in handles {
+            let _ = h.await;
+        }
+    });
 
-        send_data(&client, &flat).await?;
+    Ok(())
 
-        // Sleep 10 ms
-        tokio::time::sleep(time::Duration::from_millis(10)).await;
-    }
+
+    // loop {
+    //     let tasks: Vec<_> = region_list
+    //         .iter()
+    //         .enumerate()
+    //         .map(|(i, regions)| {
+    //             let cap = &caps[i];
+    //             let prev = &avg_colors[i];
+    //             get_average_colors(regions, cap, prev, brightness)
+    //         })
+    //         .collect();
+    //
+    //     let results: Vec<_> = tasks.into_iter().map(|r| r.unwrap_or_default()).collect();
+    //
+    //     // Update avg_colors
+    //     for (i, res) in results.iter().enumerate() {
+    //         avg_colors[i] = res.clone();
+    //     }
+    //
+    //     let flat: Vec<(u8, u8, u8)> = results
+    //         .into_iter()
+    //         .flatten()
+    //         .map(|rgb| (rgb[0], rgb[1], rgb[2]))
+    //         .collect();
+    //
+    //     send_data(&client, &flat, dead_pixels, device_id).await?;
+    //
+    //     // Sleep 10 ms
+    //     tokio::time::sleep(time::Duration::from_millis(10)).await;
+    // }
 }

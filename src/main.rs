@@ -63,6 +63,7 @@ struct Indent {
 struct Settings {
     size: i32,
     brightness: f32,
+    smooth: bool,
     cams: Vec<i32>,
     device_id: u32,
     zone_id_list: Vec<u32>,
@@ -70,103 +71,10 @@ struct Settings {
 
 pub type Color = RGB8;
 
-pub struct VideoCaptureAsync {
-    shared: Arc<Mutex<Shared>>,
-    handle: Option<thread::JoinHandle<()>>,
-    running: Arc<AtomicBool>, // Atomic bool for controlling thread
-}
-
-struct Shared {
-    frame: Arc<Mat>, // Frame in Arc for fast cloning
-    ret: bool,       // Status of last read
-}
-
 #[derive(Debug)]
 struct MonitorRes {
     width: i32,
     height: i32,
-}
-
-impl VideoCaptureAsync {
-    fn new(source: i32) -> opencv::Result<Self> {
-        let mut cap = videoio::VideoCapture::new(source, videoio::CAP_V4L2)?;
-        if !cap.is_opened()? {
-            panic!("Can't open camera {}", source);
-        }
-
-        let mut frame = Mat::default();
-        let ret = cap.read(&mut frame)?;
-
-        let shared = Arc::new(Mutex::new(Shared {
-            frame: Arc::new(frame), // Initial frame in Arc
-            ret,
-        }));
-
-        let running = Arc::new(AtomicBool::new(true));
-        let thread_running = Arc::clone(&running);
-        let thread_shared = Arc::clone(&shared);
-
-        let handle = thread::spawn(move || {
-            loop {
-                // Check the flag without locking the mutex
-                if !thread_running.load(Ordering::Relaxed) {
-                    break;
-                }
-
-                // Read the frame without locking the mutex
-                let mut mat = Mat::default();
-                let ret = cap.read(&mut mat);
-
-                // Check the flag after reading
-                if !thread_running.load(Ordering::Relaxed) {
-                    break;
-                }
-
-                let mut s = match thread_shared.lock() {
-                    Ok(guard) => guard,
-                    Err(_) => break, // If mutex is poisoned
-                };
-
-                match ret {
-                    Ok(r) => {
-                        s.ret = r;
-                        if r {
-                            // Update frame (fast creation of Arc)
-                            s.frame = Arc::new(mat);
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("Error reading frame: {}", e);
-                        s.ret = false; //Important: update status!
-                    }
-                }
-            }
-        });
-
-        Ok(VideoCaptureAsync {
-            shared,
-            handle: Some(handle),
-            running,
-        })
-    }
-
-    fn read(&self) -> opencv::Result<(bool, Arc<Mat>)> {
-        let s = self.shared.lock().unwrap();
-        Ok((s.ret, s.frame.clone())) // Cloning Arc (cheap)
-    }
-
-    fn stop(&mut self) {
-        self.running.store(false, Ordering::Relaxed); // Signal thread to stop
-        if let Some(handle) = self.handle.take() {
-            handle.join().unwrap(); // Waiting for thread to finish
-        }
-    }
-}
-
-impl Drop for VideoCaptureAsync {
-    fn drop(&mut self) {
-        self.stop();
-    }
 }
 
 fn get_monitors_info() -> Result<Vec<MonitorRes>, Box<dyn std::error::Error>> {
@@ -224,6 +132,7 @@ fn get_average_colors(
     cap: &mut VideoCapture,
     previous_avg_colors: &[[u8; 3]],
     brightness: f32,
+    smooth: bool,
 ) -> Result<Vec<[u8; 3]>, Box<dyn std::error::Error>> {
     let mut img = Mat::default();
     let ret = cap.read(&mut img)?;
@@ -249,13 +158,16 @@ fn get_average_colors(
         let r = mean[2] as f32;
 
         let rounded = round_rgb(r, g, b, brightness);
-
-        let avg = if previous_avg_colors.is_empty() {
-            average_rgb([0, 0, 0], rounded)
+        if smooth {
+            let avg = if previous_avg_colors.is_empty() {
+                average_rgb([0, 0, 0], rounded)
+            } else {
+                average_rgb(previous_avg_colors[i], rounded)
+            };
+            avg_colors.push(avg);
         } else {
-            average_rgb(previous_avg_colors[i], rounded)
-        };
-        avg_colors.push(avg);
+            avg_colors.push(rounded);
+        }
     }
 
     Ok(avg_colors)
@@ -393,6 +305,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let size = config.settings.size;
     let brightness = config.settings.brightness;
+    let smooth = config.settings.smooth;
     let cams = config.settings.cams;
     let device_id = config.settings.device_id;
     let zone_id_list = config.settings.zone_id_list;
@@ -421,58 +334,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         size,
     );
 
-    // let mut avg_colors: Vec<Vec<[u8; 3]>> = vec![Vec::new(); monitors.len()];
-    //
-    // let mut caps: Vec<VideoCaptureAsync> = Vec::new();
-    // for i in cams {
-    //     caps.push(VideoCaptureAsync::new(i)?);
-    // }
-
-    // let client = OpenRGB::connect().await?;
-
-    // let mut handles = Vec::with_capacity(cams.len());
-    // for (i, &cam) in cams.iter().enumerate() {
-    //     let region = region_list[i].clone();
-    //     let client = OpenRGB::connect().await?;
-    //     let device_id = device_id.clone();
-    //     let zone_id = zone_id_list[i].clone();
-    //     let brightness = brightness;
-    //
-    //     let handle = tokio::spawn(async move {
-    //         // CPU-тяжёлый код — в spawn_blocking
-    //         tokio::task::spawn_blocking(move || {
-    //             let mut cap = VideoCapture::new(cam, videoio::CAP_V4L2).unwrap();
-    //             if !cap.is_opened().unwrap() {
-    //                 panic!("Can't open camera {}", cam);
-    //             }
-    //
-    //             let mut avg_colors = Vec::new();
-    //             loop {
-    //                 let prev = &avg_colors;
-    //                 let res = get_average_colors(&region, &mut cap, prev, brightness)
-    //                     .unwrap_or_default();
-    //                 avg_colors = res.clone();
-    //                 // нужно вернуть `res` сюда для send
-    //                 avg_colors = res.clone();
-    //                 // отправка — асинхронная
-    //                 let send = async {
-    //                     send_data(&client, &res, device_id, zone_id).await.unwrap();
-    //                 };
-    //                 // ждем завершения send
-    //                 tokio::runtime::Handle::current().block_on(send);
-    //             }
-    //         })
-    //         .await
-    //         .unwrap();
-    //     });
-    //     handles.push(handle);
-    // }
-    //
-    // for h in handles {
-    //     let _ = h.await;
-    // }
-    //
-
     let num_threads = cams.len().max(1);
     let rt = Builder::new_multi_thread()
         .worker_threads(num_threads)
@@ -499,7 +360,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     loop {
                         let start = time::Instant::now();
                         let prev = &avg_colors;
-                        let res = get_average_colors(&region, &mut cap, prev, brightness)
+                        let res = get_average_colors(&region, &mut cap, prev, brightness, smooth)
                             .unwrap_or_default();
                         avg_colors = res.clone();
                         tokio::runtime::Handle::current().block_on(
@@ -521,34 +382,4 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 
-
-    // loop {
-    //     let tasks: Vec<_> = region_list
-    //         .iter()
-    //         .enumerate()
-    //         .map(|(i, regions)| {
-    //             let cap = &caps[i];
-    //             let prev = &avg_colors[i];
-    //             get_average_colors(regions, cap, prev, brightness)
-    //         })
-    //         .collect();
-    //
-    //     let results: Vec<_> = tasks.into_iter().map(|r| r.unwrap_or_default()).collect();
-    //
-    //     // Update avg_colors
-    //     for (i, res) in results.iter().enumerate() {
-    //         avg_colors[i] = res.clone();
-    //     }
-    //
-    //     let flat: Vec<(u8, u8, u8)> = results
-    //         .into_iter()
-    //         .flatten()
-    //         .map(|rgb| (rgb[0], rgb[1], rgb[2]))
-    //         .collect();
-    //
-    //     send_data(&client, &flat, dead_pixels, device_id).await?;
-    //
-    //     // Sleep 10 ms
-    //     tokio::time::sleep(time::Duration::from_millis(10)).await;
-    // }
 }

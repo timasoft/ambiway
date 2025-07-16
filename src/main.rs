@@ -107,9 +107,9 @@ fn get_config_path() -> Option<PathBuf> {
 
 fn round_rgb(r: f32, g: f32, b: f32, brightness: f32) -> [u8; 3] {
     [
-        (r * brightness).round() as u8,
-        (g * brightness).round() as u8,
-        (b * brightness).round() as u8,
+        (r * brightness).clamp(0.0, 255.0).round() as u8,
+        (g * brightness).clamp(0.0, 255.0).round() as u8,
+        (b * brightness).clamp(0.0, 255.0).round() as u8,
     ]
 }
 
@@ -272,7 +272,6 @@ async fn send_data(
     device_id: u32,
     zone_id: u32,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Black first, then the rest of data
     let mut colors: Vec<RGB8> = Vec::with_capacity(data.len());
 
     for rgb in data {

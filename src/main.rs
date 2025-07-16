@@ -1,19 +1,16 @@
 use clap::Parser;
 use directories::ProjectDirs;
 use opencv::prelude::*;
+use opencv::videoio::VideoCapture;
 use opencv::{core, videoio};
 use openrgb::OpenRGB;
 use rgb::RGB8;
 use serde::Deserialize;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::{
-    Arc, Mutex,
-    atomic::{AtomicBool, Ordering},
-};
-use std::thread;
 use std::time;
 use tokio::net::TcpStream;
+use tokio::runtime::Builder;
 use xrandr::XHandle;
 
 /// Ambilight with OpenRGB
@@ -54,115 +51,24 @@ struct Indent {
     right_down: Vec<i32>,
     down_left: Vec<i32>,
     down_right: Vec<i32>,
-
 }
 
 #[derive(Debug, Deserialize)]
 struct Settings {
     size: i32,
     brightness: f32,
+    smooth: bool,
     cams: Vec<i32>,
+    device_id: u32,
+    zone_id_list: Vec<u32>,
 }
 
 pub type Color = RGB8;
-
-pub struct VideoCaptureAsync {
-    shared: Arc<Mutex<Shared>>,
-    handle: Option<thread::JoinHandle<()>>,
-    running: Arc<AtomicBool>, // Atomic bool for controlling thread
-}
-
-struct Shared {
-    frame: Arc<Mat>, // Frame in Arc for fast cloning
-    ret: bool,       // Status of last read
-}
 
 #[derive(Debug)]
 struct MonitorRes {
     width: i32,
     height: i32,
-}
-
-impl VideoCaptureAsync {
-    fn new(source: i32) -> opencv::Result<Self> {
-        let mut cap = videoio::VideoCapture::new(source, videoio::CAP_V4L2)?;
-        if !cap.is_opened()? {
-            panic!("Can't open camera {}", source);
-        }
-
-        let mut frame = Mat::default();
-        let ret = cap.read(&mut frame)?;
-
-        let shared = Arc::new(Mutex::new(Shared {
-            frame: Arc::new(frame), // Initial frame in Arc
-            ret,
-        }));
-
-        let running = Arc::new(AtomicBool::new(true));
-        let thread_running = Arc::clone(&running);
-        let thread_shared = Arc::clone(&shared);
-
-        let handle = thread::spawn(move || {
-            loop {
-                // Check the flag without locking the mutex
-                if !thread_running.load(Ordering::Relaxed) {
-                    break;
-                }
-
-                // Read the frame without locking the mutex
-                let mut mat = Mat::default();
-                let ret = cap.read(&mut mat);
-
-                // Check the flag after reading
-                if !thread_running.load(Ordering::Relaxed) {
-                    break;
-                }
-
-                let mut s = match thread_shared.lock() {
-                    Ok(guard) => guard,
-                    Err(_) => break, // If mutex is poisoned
-                };
-
-                match ret {
-                    Ok(r) => {
-                        s.ret = r;
-                        if r {
-                            // Update frame (fast creation of Arc)
-                            s.frame = Arc::new(mat);
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("Error reading frame: {}", e);
-                        s.ret = false; //Important: update status!
-                    }
-                }
-            }
-        });
-
-        Ok(VideoCaptureAsync {
-            shared,
-            handle: Some(handle),
-            running,
-        })
-    }
-
-    fn read(&self) -> opencv::Result<(bool, Arc<Mat>)> {
-        let s = self.shared.lock().unwrap();
-        Ok((s.ret, s.frame.clone())) // Cloning Arc (cheap)
-    }
-
-    fn stop(&mut self) {
-        self.running.store(false, Ordering::Relaxed); // Signal thread to stop
-        if let Some(handle) = self.handle.take() {
-            handle.join().unwrap(); // Waiting for thread to finish
-        }
-    }
-}
-
-impl Drop for VideoCaptureAsync {
-    fn drop(&mut self) {
-        self.stop();
-    }
 }
 
 fn get_monitors_info() -> Result<Vec<MonitorRes>, Box<dyn std::error::Error>> {
@@ -184,13 +90,13 @@ fn get_monitors_info() -> Result<Vec<MonitorRes>, Box<dyn std::error::Error>> {
 fn load_config() -> Config {
     let config_path = get_config_path().expect("Failed to get config path");
     let config_str = fs::read_to_string(&config_path)
-        .unwrap_or_else(|_| panic!("Failed to read config file: {:?}", config_path));
+        .unwrap_or_else(|_| panic!("Failed to read config file: {config_path:?}"));
     toml::from_str(&config_str).expect("Failed to parse config TOML")
 }
 
 fn load_config_from_file(path: &PathBuf) -> Config {
     let config_str = fs::read_to_string(path)
-        .unwrap_or_else(|_| panic!("Failed to read config file: {:?}", path));
+        .unwrap_or_else(|_| panic!("Failed to read config file: {path:?}"));
     toml::from_str(&config_str).expect("Failed to parse config TOML")
 }
 
@@ -217,11 +123,13 @@ fn average_rgb(rgb1: [u8; 3], rgb2: [u8; 3]) -> [u8; 3] {
 
 fn get_average_colors(
     regions: &[[i32; 4]],
-    cap: &VideoCaptureAsync,
+    cap: &mut VideoCapture,
     previous_avg_colors: &[[u8; 3]],
     brightness: f32,
+    smooth: bool,
 ) -> Result<Vec<[u8; 3]>, Box<dyn std::error::Error>> {
-    let (ret, img) = cap.read()?;
+    let mut img = Mat::default();
+    let ret = cap.read(&mut img)?;
     if !ret {
         return Ok(vec![]);
     }
@@ -235,7 +143,7 @@ fn get_average_colors(
         let y2 = region[3];
 
         // Cut ROI from image
-        let roi = Mat::roi(img.as_ref(), core::Rect::new(x1, y1, x2 - x1, y2 - y1))?;
+        let roi = Mat::roi(&img, core::Rect::new(x1, y1, x2 - x1, y2 - y1))?;
 
         // mean returns Scalar(B, G, R, A)
         let mean = core::mean(&roi, &core::no_array())?;
@@ -244,13 +152,16 @@ fn get_average_colors(
         let r = mean[2] as f32;
 
         let rounded = round_rgb(r, g, b, brightness);
-
-        let avg = if previous_avg_colors.is_empty() {
-            average_rgb([0, 0, 0], rounded)
+        if smooth {
+            let avg = if previous_avg_colors.is_empty() {
+                average_rgb([0, 0, 0], rounded)
+            } else {
+                average_rgb(previous_avg_colors[i], rounded)
+            };
+            avg_colors.push(avg);
         } else {
-            average_rgb(previous_avg_colors[i], rounded)
-        };
-        avg_colors.push(avg);
+            avg_colors.push(rounded);
+        }
     }
 
     Ok(avg_colors)
@@ -297,7 +208,12 @@ fn calculate_regions(
             for a in 0..=left_led[i] {
                 let value = (left_step * a as f32).round() as i32 + left_down_indent[i];
                 if a > 0 {
-                    monitor_regions.push([0, inner_height_left - value + left_up_indent[i], size, inner_height_left - b + left_up_indent[i]]);
+                    monitor_regions.push([
+                        0,
+                        inner_height_left - value + left_up_indent[i],
+                        size,
+                        inner_height_left - b + left_up_indent[i],
+                    ]);
                 }
                 b = value;
             }
@@ -352,28 +268,29 @@ fn calculate_regions(
 
 async fn send_data(
     client: &OpenRGB<TcpStream>,
-    data: &[(u8, u8, u8)],
+    data: &Vec<[u8; 3]>,
+    device_id: u32,
+    zone_id: u32,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Black first, then the rest of data
-    let mut colors: Vec<RGB8> = Vec::with_capacity(data.len() + 1);
-    colors.push(RGB8::new(0, 0, 0));
-    for &(r, g, b) in data {
-        colors.push(RGB8::new(r, g, b));
+    let mut colors: Vec<RGB8> = Vec::with_capacity(data.len());
+
+    for rgb in data {
+        colors.push(RGB8::new(rgb[0], rgb[1], rgb[2]));
     }
 
     // Send data
-    client.update_leds(0, colors).await?;
+    client.update_zone_leds(device_id, zone_id, colors).await?;
 
     Ok(())
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
     let config = match args.config {
         Some(path) => {
-            println!("Using user config: {:?}", path);
+            println!("Using user config: {path:?}", );
             load_config_from_file(&path)
         }
         None => load_config(),
@@ -387,12 +304,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let size = config.settings.size;
     let brightness = config.settings.brightness;
+    let smooth = config.settings.smooth;
     let cams = config.settings.cams;
+    let device_id = config.settings.device_id;
+    let zone_id_list = config.settings.zone_id_list;
 
-    println!(
-        "Loaded config: size = {}, brightness = {}",
-        size, brightness
-    );
+    println!("Loaded config: size = {size}, brightness = {brightness}");
 
     let monitors = get_monitors_info()?;
 
@@ -413,42 +330,55 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         size,
     );
 
-    let mut avg_colors: Vec<Vec<[u8; 3]>> = vec![Vec::new(); monitors.len()];
+    let num_threads = cams.len().max(1);
+    let rt = Builder::new_multi_thread()
+        .worker_threads(num_threads)
+        .max_blocking_threads(num_threads) // можно регулировать отдельно
+        .enable_all()
+        .build()?;
 
-    let mut caps: Vec<VideoCaptureAsync> = Vec::new();
-    for i in cams {
-        caps.push(VideoCaptureAsync::new(i)?);
-    }
+    rt.block_on(async move {
+        let mut handles = Vec::with_capacity(cams.len());
+        for (i, &cam) in cams.iter().enumerate() {
+            let region = region_list[i].clone();
+            let device_id = device_id;
+            let zone_id = zone_id_list[i];
+            let brightness = brightness;
+            let client = OpenRGB::connect().await.unwrap();
 
-    let client = OpenRGB::connect().await?;
-
-    loop {
-        let tasks: Vec<_> = region_list
-            .iter()
-            .enumerate()
-            .map(|(i, regions)| {
-                let cap = &caps[i];
-                let prev = &avg_colors[i];
-                get_average_colors(regions, cap, prev, brightness)
-            })
-            .collect();
-
-        let results: Vec<_> = tasks.into_iter().map(|r| r.unwrap_or_default()).collect();
-
-        // Update avg_colors
-        for (i, res) in results.iter().enumerate() {
-            avg_colors[i] = res.clone();
+            handles.push(tokio::spawn(async move {
+                tokio::task::spawn_blocking(move || {
+                    let mut cap = VideoCapture::new(cam, videoio::CAP_V4L2).expect("Failed to open camera");
+                    if !cap.is_opened().expect("Failed to check if camera is opened") {
+                        eprintln!("Can't open camera {cam}");
+                        return;
+                    }
+                    let mut avg_colors = Vec::new();
+                    loop {
+                        let prev = &avg_colors;
+                        let res = get_average_colors(&region, &mut cap, prev, brightness, smooth)
+                            .unwrap_or_default();
+                        avg_colors = res.clone();
+                        tokio::runtime::Handle::current().block_on(send_data(
+                            &client,
+                            &res,
+                            device_id,
+                            zone_id,
+                        )).expect("Failed to send data");
+                        std::thread::sleep(time::Duration::from_millis(45));
+                    }
+                })
+                .await
+                .unwrap();
+            }));
         }
 
-        let flat: Vec<(u8, u8, u8)> = results
-            .into_iter()
-            .flatten()
-            .map(|rgb| (rgb[0], rgb[1], rgb[2]))
-            .collect();
+        for h in handles {
+            if let Err(e) = h.await {
+                eprintln!("Task failed: {e}");
+            }
+        }
+    });
 
-        send_data(&client, &flat).await?;
-
-        // Sleep 10 ms
-        tokio::time::sleep(time::Duration::from_millis(10)).await;
-    }
+    Ok(())
 }

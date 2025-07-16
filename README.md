@@ -19,5 +19,8 @@ down_right = [0, 0]
 [settings]
 size = 50
 brightness = 0.25
+smooth = false
 cams = [2, 3]
+device_id = 0
+zone_id_list = [1, 2]
 ```

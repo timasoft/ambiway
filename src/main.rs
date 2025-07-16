@@ -348,9 +348,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             handles.push(tokio::spawn(async move {
                 tokio::task::spawn_blocking(move || {
-                    let mut cap = VideoCapture::new(cam, videoio::CAP_V4L2).unwrap();
-                    if !cap.is_opened().unwrap() {
-                        panic!("Can't open camera {cam}");
+                    let mut cap = VideoCapture::new(cam, videoio::CAP_V4L2).expect("Failed to open camera");
+                    if !cap.is_opened().expect("Failed to check if camera is opened") {
+                        eprintln!("Can't open camera {cam}");
+                        return;
                     }
                     let mut avg_colors = Vec::new();
                     loop {
@@ -373,7 +374,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         for h in handles {
-            let _ = h.await;
+            if let Err(e) = h.await {
+                eprintln!("Task failed: {e}");
+            }
         }
     });
 

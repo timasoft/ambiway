@@ -95,8 +95,8 @@ fn load_config() -> Config {
 }
 
 fn load_config_from_file(path: &PathBuf) -> Config {
-    let config_str = fs::read_to_string(path)
-        .unwrap_or_else(|_| panic!("Failed to read config file: {path:?}"));
+    let config_str =
+        fs::read_to_string(path).unwrap_or_else(|_| panic!("Failed to read config file: {path:?}"));
     toml::from_str(&config_str).expect("Failed to parse config TOML")
 }
 
@@ -289,7 +289,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let config = match args.config {
         Some(path) => {
-            println!("Using user config: {path:?}", );
+            println!("Using user config: {path:?}",);
             load_config_from_file(&path)
         }
         None => load_config(),
@@ -347,8 +347,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             handles.push(tokio::spawn(async move {
                 tokio::task::spawn_blocking(move || {
-                    let mut cap = VideoCapture::new(cam, videoio::CAP_V4L2).expect("Failed to open camera");
-                    if !cap.is_opened().expect("Failed to check if camera is opened") {
+                    let mut cap =
+                        VideoCapture::new(cam, videoio::CAP_V4L2).expect("Failed to open camera");
+                    if !cap
+                        .is_opened()
+                        .expect("Failed to check if camera is opened")
+                    {
                         eprintln!("Can't open camera {cam}");
                         return;
                     }
@@ -358,12 +362,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let res = get_average_colors(&region, &mut cap, prev, brightness, smooth)
                             .unwrap_or_default();
                         avg_colors = res.clone();
-                        tokio::runtime::Handle::current().block_on(send_data(
-                            &client,
-                            &res,
-                            device_id,
-                            zone_id,
-                        )).expect("Failed to send data");
+                        tokio::runtime::Handle::current()
+                            .block_on(send_data(&client, &res, device_id, zone_id))
+                            .expect("Failed to send data");
                         std::thread::sleep(time::Duration::from_millis(45));
                     }
                 })

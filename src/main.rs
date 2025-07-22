@@ -17,10 +17,6 @@ use xrandr::XHandle;
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct Args {
-    /// Run in GUI mode
-    #[arg(short = 'g', long = "gui")]
-    gui: bool,
-
     /// Set config file
     #[arg(short = 'c', long = "config", value_name = "FILE")]
     config: Option<PathBuf>,
@@ -294,12 +290,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         None => load_config(),
     };
-
-    // Process GUI mode
-    if args.gui {
-        println!("Not implemented yet");
-        return Ok(());
-    }
 
     let size = config.settings.size;
     let brightness = config.settings.brightness;

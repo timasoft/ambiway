@@ -3,13 +3,12 @@ use directories::ProjectDirs;
 use opencv::prelude::*;
 use opencv::videoio::VideoCapture;
 use opencv::{core, videoio};
-use openrgb::OpenRGB;
+use openrgb2::{OpenRgbClient, Zone};
 use rgb::RGB8;
 use serde::Deserialize;
 use std::fs;
 use std::path::PathBuf;
 use std::time;
-use tokio::net::TcpStream;
 use tokio::runtime::Builder;
 use xrandr::XHandle;
 
@@ -55,8 +54,8 @@ struct Settings {
     brightness: f32,
     smooth: bool,
     cams: Vec<i32>,
-    device_id: u32,
-    zone_id_list: Vec<u32>,
+    device_id: usize,
+    zone_id_list: Vec<usize>,
 }
 
 pub type Color = RGB8;
@@ -262,20 +261,17 @@ fn calculate_regions(
     regions_list
 }
 
-async fn send_data(
-    client: &OpenRGB<TcpStream>,
-    data: &Vec<[u8; 3]>,
-    device_id: u32,
-    zone_id: u32,
+async fn send_data<'a>(
+    zone: &Zone<'a>,
+    data: &[[u8; 3]],
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut colors: Vec<RGB8> = Vec::with_capacity(data.len());
-
-    for rgb in data {
-        colors.push(RGB8::new(rgb[0], rgb[1], rgb[2]));
-    }
+    let colors: Vec<RGB8> = data
+        .iter()
+        .map(|rgb| RGB8::new(rgb[0], rgb[1], rgb[2]))
+        .collect();
 
     // Send data
-    client.update_zone_leds(device_id, zone_id, colors).await?;
+    zone.set_leds(colors).await?;
 
     Ok(())
 }
@@ -328,15 +324,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     rt.block_on(async move {
         let mut handles = Vec::with_capacity(cams.len());
+        let client = OpenRgbClient::connect().await.unwrap();
         for (i, &cam) in cams.iter().enumerate() {
             let region = region_list[i].clone();
-            let device_id = device_id;
-            let zone_id = zone_id_list[i];
             let brightness = brightness;
-            let client = OpenRGB::connect().await.unwrap();
+            let controller = client.get_controller(device_id).await.unwrap();
+            let zone_id = zone_id_list[i];
 
             handles.push(tokio::spawn(async move {
                 tokio::task::spawn_blocking(move || {
+                    let zone = controller.get_zone(zone_id).unwrap();
                     let mut cap =
                         VideoCapture::new(cam, videoio::CAP_V4L2).expect("Failed to open camera");
                     if !cap
@@ -353,9 +350,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             .unwrap_or_default();
                         avg_colors = res.clone();
                         tokio::runtime::Handle::current()
-                            .block_on(send_data(&client, &res, device_id, zone_id))
+                            .block_on(send_data(&zone, &res))
                             .expect("Failed to send data");
-                        std::thread::sleep(time::Duration::from_millis(45));
+                        std::thread::sleep(time::Duration::from_millis(95));
                     }
                 })
                 .await

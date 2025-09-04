@@ -162,6 +162,7 @@ fn get_average_colors(
     Ok(avg_colors)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn calculate_regions(
     monitors: &[MonitorRes],
     left_led: &[i32],

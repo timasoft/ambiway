@@ -22,29 +22,14 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      # - name: Install dependencies
-      #   run: |
-      #     sudo apt update
-      #     sudo apt install -y build-essential
-      #     sudo apt-get install -y \
-      #       libpango1.0-dev \
-      #       libcairo2-dev \
-      #       libatk1.0-dev \
-      #       libgtk-4-dev \
-      #       libsoup2.4-dev
-      #
-      # - name: Set up dependencies
-      #   run: |
-      #     export SYSTEM_DEPS_PANGO_NO_PKG_CONFIG="true"
-      #     export SYSTEM_DEPS_PANGO_LIB="pango-1.0"
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Setup Nix
+        uses: nix-community/actions-nix/setup-nix@v16
 
       - name: Build
-        run: |
-          cargo build --verbose
-          cargo build --release --verbose
+        run: nix develop .#devShell.default --command cargo build --verbose
+
+      - name: Build release
+        run: nix develop .#devShell.default --command cargo build --release --verbose
 
   check:
     runs-on: ubuntu-latest
@@ -53,26 +38,11 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      # - name: Install dependencies
-      #   run: |
-      #     sudo apt update
-      #     sudo apt install -y build-essential
-      #     sudo apt-get install -y \
-      #       libpango1.0-dev \
-      #       libcairo2-dev \
-      #       libatk1.0-dev \
-      #       libgtk-4-dev \
-      #       libsoup2.4-dev
-      #
-      # - name: Set up dependencies
-      #   run: |
-      #     export SYSTEM_DEPS_PANGO_NO_PKG_CONFIG="true"
-      #     export SYSTEM_DEPS_PANGO_LIB="pango-1.0"
+      - name: Setup Nix
+        uses: nix-community/actions-nix/setup-nix@v16
 
       - name: Run cargo clippy
-        run: |
-          cargo clippy -- -Dwarnings
-          cargo clippy --release -- -Dwarnings
+        run: nix develop .#devShell.default --command "cargo clippy -- -Dwarnings && cargo clippy --release -- -Dwarnings"
 
       - name: Run cargo fmt
-        run: cargo fmt --all --check
+        run: nix develop .#devShell.default --command cargo fmt --all --check

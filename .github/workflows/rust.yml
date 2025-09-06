@@ -29,10 +29,10 @@ jobs:
             experimental-features = nix-command flakes
 
       - name: Build
-        run: nix develop .#devShell.default --command cargo build --verbose
+        run: nix develop .#devShells.default --command cargo build --verbose
 
       - name: Build release
-        run: nix develop .#devShell.default --command cargo build --release --verbose
+        run: nix develop .#devShells.default --command cargo build --release --verbose
 
   check:
     runs-on: ubuntu-latest
@@ -48,7 +48,7 @@ jobs:
             experimental-features = nix-command flakes
 
       - name: Run cargo clippy
-        run: nix develop .#devShell.default --command "cargo clippy -- -Dwarnings && cargo clippy --release -- -Dwarnings"
+        run: nix develop .#devShells.default --command "cargo clippy -- -Dwarnings && cargo clippy --release -- -Dwarnings"
 
       - name: Run cargo fmt
-        run: nix develop .#devShell.default --command cargo fmt --all --check
+        run: nix develop .#devShells.default --command cargo fmt --all --check

@@ -244,7 +244,8 @@ zone_id_list = [1, 2]  # OpenRGB zone IDs corresponding to each monitor
 - For X11: ffmpeg
 - For Wayland: wf-recorder
 
-
+## TODO:
+- [ ] Replace OpenRGB with something better
 
 <!-- ### Example config (```.config/ambiway/config.toml```) -->
 <!-- ```toml -->

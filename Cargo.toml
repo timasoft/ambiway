@@ -14,5 +14,5 @@ openrgb2 = "0.3.0"
 rgb = "0.8.52"
 serde = { version = "1.0.226", features = ["derive"] }
 tokio = {"version" = "1.46.1", features = ["full"]}
-toml = "0.9.2"
+toml = "0.9.7"
 xrandr = "0.2.0"

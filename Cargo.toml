@@ -4,7 +4,7 @@ version = "0.3.1"
 edition = "2024"
 
 [dependencies]
-clap = { version = "4.5.48", features = ["derive"] }
+clap = { version = "4.5.51", features = ["derive"] }
 directories = "6.0.0"
 opencv = { version = "0.96.0", default-features = false, features = [
     "clang-runtime",

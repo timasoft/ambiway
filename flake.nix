@@ -15,7 +15,7 @@
       ambiway = naerskLib.buildPackage {
         src = ./.;
         buildInputs = with pkgs; [
-          opencv xorg.libX11 xorg.libXrandr
+          opencv libX11 libXrandr
         ];
         nativeBuildInputs = [ pkgs.pkg-config pkgs.clang ];
         LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
@@ -29,7 +29,7 @@
         buildInputs = with pkgs; [
           fish
           cargo rustc rustfmt clippy rust-analyzer
-          opencv xorg.libX11 xorg.libXrandr
+          opencv libX11 libXrandr
         ];
         nativeBuildInputs = [ pkgs.pkg-config pkgs.clang ];
 

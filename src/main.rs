@@ -56,6 +56,7 @@ struct Settings {
     cams: Vec<i32>,
     device_id: usize,
     zone_id_list: Vec<usize>,
+    monitor_id_list: Option<Vec<usize>>,
 }
 
 pub type Color = RGB8;
@@ -66,19 +67,38 @@ struct MonitorRes {
     height: i32,
 }
 
-fn get_monitors_info() -> Result<Vec<MonitorRes>, Box<dyn std::error::Error>> {
+fn get_monitors_info(
+    monitor_id_list: Option<Vec<usize>>,
+) -> Result<Vec<MonitorRes>, Box<dyn std::error::Error>> {
     // Create an XHandle instance
     let mut xh = XHandle::open()?;
     // Get a list of monitors
     let monitors = xh.monitors()?;
-    // Collect the results
-    let info = monitors
-        .iter()
-        .map(|m| MonitorRes {
-            width: m.width_px,
-            height: m.height_px,
-        })
-        .collect();
+
+    // Filter and collect the results based on monitor_id_list
+    let info = match monitor_id_list {
+        None => {
+            // Return all monitors if no filter specified
+            monitors
+                .iter()
+                .map(|m| MonitorRes {
+                    width: m.width_px,
+                    height: m.height_px,
+                })
+                .collect()
+        }
+        Some(ids) => {
+            // Return only monitors with specified indices
+            ids.into_iter()
+                .filter_map(|i| {
+                    monitors.get(i).map(|m| MonitorRes {
+                        width: m.width_px,
+                        height: m.height_px,
+                    })
+                })
+                .collect()
+        }
+    };
     Ok(info)
 }
 
@@ -294,10 +314,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cams = config.settings.cams;
     let device_id = config.settings.device_id;
     let zone_id_list = config.settings.zone_id_list;
+    let monitor_id_list = config.settings.monitor_id_list;
 
     println!("Loaded config: size = {size}, brightness = {brightness}");
 
-    let monitors = get_monitors_info()?;
+    let monitors = get_monitors_info(monitor_id_list)?;
 
     let region_list = calculate_regions(
         &monitors,

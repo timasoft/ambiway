@@ -358,8 +358,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("Starting in PAUSED state.");
     }
 
-    // Shared state for pause toggle
-    let paused_state = Arc::new(AtomicBool::new(args.paused));
+    let manual_pause = Arc::new(AtomicBool::new(args.paused));
+    let screen_off = Arc::new(AtomicBool::new(false));
 
     let monitors = get_monitors_info(monitor_id_list)?;
 
@@ -389,7 +389,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     rt.block_on(async move {
         // Spawn a task to listen for SIGUSR1 to toggle pause
-        let paused_signal = paused_state.clone();
+        let paused_signal = manual_pause.clone();
         tokio::spawn(async move {
             let mut sigusr1 =
                 signal(SignalKind::user_defined1()).expect("Failed to listen for SIGUSR1");
@@ -401,6 +401,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         });
 
+        // Spawn a task to poll DRM DPMS state automatically
+        let paused_signal = screen_off.clone();
+        tokio::spawn(async move {
+            loop {
+                let mut is_dpms_off = false;
+
+                if let Ok(paths) = std::fs::read_dir("/sys/class/drm") {
+                    for path in paths.flatten() {
+                        let dpms_path = path.path().join("dpms");
+                        if let Ok(state) = std::fs::read_to_string(dpms_path)
+                            && state.trim() == "Off"
+                        {
+                            is_dpms_off = true;
+                            break;
+                        }
+                    }
+                }
+
+                paused_signal.store(is_dpms_off, Ordering::Relaxed);
+
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+        });
+
         let mut handles = Vec::with_capacity(cams.len());
         let client = OpenRgbClient::connect().await.unwrap();
         for (i, &cam) in cams.iter().enumerate() {
@@ -408,7 +432,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let brightness = brightness;
             let controller = client.get_controller(device_id).await.unwrap();
             let zone_id = zone_id_list[i];
-            let paused_clone = paused_state.clone();
+
+            let manual_pause_clone = manual_pause.clone();
+            let screen_off_clone = screen_off.clone();
 
             handles.push(tokio::spawn(async move {
                 tokio::task::spawn_blocking(move || {
@@ -423,7 +449,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         return;
                     }
                     let mut avg_colors = Vec::new();
-                    let mut is_paused = paused_clone.load(Ordering::Relaxed);
+                    let mut is_paused = manual_pause_clone.load(Ordering::Relaxed)
+                        || screen_off_clone.load(Ordering::Relaxed);
 
                     // If started paused, turn off LEDs immediately
                     if is_paused {
@@ -434,7 +461,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
 
                     loop {
-                        let currently_paused = paused_clone.load(Ordering::Relaxed);
+                        let currently_paused = manual_pause_clone.load(Ordering::Relaxed)
+                            || screen_off_clone.load(Ordering::Relaxed);
 
                         // Handle state transitions
                         if currently_paused && !is_paused {

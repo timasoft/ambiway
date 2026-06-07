@@ -65,14 +65,34 @@ struct Indent {
 
 #[derive(Debug, Deserialize)]
 struct Settings {
+    #[serde(default = "default_size")]
     size: i32,
+    #[serde(default = "default_brightness")]
     brightness: f32,
+    #[serde(default = "default_delay_ms")]
     delay_ms: u64,
+    #[serde(default = "default_smooth")]
     smooth: bool,
     cams: Vec<i32>,
     device_id: usize,
     zone_id_list: Vec<usize>,
     monitor_id_list: Option<Vec<usize>>,
+}
+
+fn default_size() -> i32 {
+    50
+}
+
+fn default_brightness() -> f32 {
+    1.0
+}
+
+fn default_delay_ms() -> u64 {
+    95
+}
+
+fn default_smooth() -> bool {
+    true
 }
 
 pub type Color = RGB8;

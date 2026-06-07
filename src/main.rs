@@ -1,15 +1,26 @@
 use clap::Parser;
 use directories::ProjectDirs;
-use opencv::prelude::*;
-use opencv::videoio::VideoCapture;
-use opencv::{core, videoio};
+use opencv::{
+    core,
+    prelude::*,
+    videoio::{self, VideoCapture},
+};
 use openrgb2::{OpenRgbClient, Zone};
 use rgb::RGB8;
 use serde::Deserialize;
-use std::fs;
-use std::path::PathBuf;
-use std::time;
-use tokio::runtime::Builder;
+use std::{
+    fs,
+    path::PathBuf,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    time,
+};
+use tokio::{
+    runtime::Builder,
+    signal::unix::{signal, SignalKind},
+};
 use xrandr::XHandle;
 
 /// Ambilight with OpenRGB
@@ -19,6 +30,10 @@ struct Args {
     /// Set config file
     #[arg(short = 'c', long = "config", value_name = "FILE")]
     config: Option<PathBuf>,
+
+    /// Start in paused state
+    #[arg(short = 'p', long = "paused")]
+    paused: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -317,6 +332,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let monitor_id_list = config.settings.monitor_id_list;
 
     println!("Loaded config: size = {size}, brightness = {brightness}");
+    if args.paused {
+        println!("Starting in PAUSED state.");
+    }
+
+    // Shared state for pause toggle
+    let paused_state = Arc::new(AtomicBool::new(args.paused));
 
     let monitors = get_monitors_info(monitor_id_list)?;
 
@@ -340,11 +361,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let num_threads = cams.len().max(1);
     let rt = Builder::new_multi_thread()
         .worker_threads(num_threads)
-        .max_blocking_threads(num_threads) // можно регулировать отдельно
+        .max_blocking_threads(num_threads)
         .enable_all()
         .build()?;
 
     rt.block_on(async move {
+        // Spawn a task to listen for SIGUSR1 to toggle pause
+        let paused_signal = paused_state.clone();
+        tokio::spawn(async move {
+            let mut sigusr1 =
+                signal(SignalKind::user_defined1()).expect("Failed to listen for SIGUSR1");
+            loop {
+                sigusr1.recv().await;
+                let current = paused_signal.load(Ordering::Relaxed);
+                paused_signal.store(!current, Ordering::Relaxed);
+                println!("[Signal] Pause toggled. New state: {}", !current);
+            }
+        });
+
         let mut handles = Vec::with_capacity(cams.len());
         let client = OpenRgbClient::connect().await.unwrap();
         for (i, &cam) in cams.iter().enumerate() {
@@ -352,6 +386,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let brightness = brightness;
             let controller = client.get_controller(device_id).await.unwrap();
             let zone_id = zone_id_list[i];
+            let paused_clone = paused_state.clone();
 
             handles.push(tokio::spawn(async move {
                 tokio::task::spawn_blocking(move || {
@@ -366,7 +401,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         return;
                     }
                     let mut avg_colors = Vec::new();
+                    let mut is_paused = paused_clone.load(Ordering::Relaxed);
+
+                    // If started paused, turn off LEDs immediately
+                    if is_paused {
+                        let black = vec![[0, 0, 0]; region.len()];
+                        tokio::runtime::Handle::current()
+                            .block_on(send_data(&zone, black.as_slice()))
+                            .expect("Failed to send data");
+                    }
+
                     loop {
+                        let currently_paused = paused_clone.load(Ordering::Relaxed);
+
+                        // Handle state transitions
+                        if currently_paused && !is_paused {
+                            // Just paused -> turn off LEDs
+                            let black = vec![[0, 0, 0]; region.len()];
+                            tokio::runtime::Handle::current()
+                                .block_on(send_data(&zone, black.as_slice()))
+                                .expect("Failed to send data");
+                            is_paused = true;
+                        } else if !currently_paused && is_paused {
+                            // Just unpaused
+                            is_paused = false;
+                        }
+
+                        // Skip heavy processing if paused
+                        if currently_paused {
+                            std::thread::sleep(time::Duration::from_millis(100));
+                            continue;
+                        }
+
                         let prev = &avg_colors;
                         let res = get_average_colors(&region, &mut cap, prev, brightness, smooth)
                             .unwrap_or_default();

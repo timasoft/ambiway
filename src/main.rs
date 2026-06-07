@@ -12,14 +12,14 @@ use std::{
     fs,
     path::PathBuf,
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc,
+        atomic::{AtomicBool, Ordering},
     },
     time,
 };
 use tokio::{
     runtime::Builder,
-    signal::unix::{signal, SignalKind},
+    signal::unix::{SignalKind, signal},
 };
 use xrandr::XHandle;
 
@@ -67,6 +67,7 @@ struct Indent {
 struct Settings {
     size: i32,
     brightness: f32,
+    delay_ms: u64,
     smooth: bool,
     cams: Vec<i32>,
     device_id: usize,
@@ -325,13 +326,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let size = config.settings.size;
     let brightness = config.settings.brightness;
+    let delay_ms = config.settings.delay_ms;
     let smooth = config.settings.smooth;
     let cams = config.settings.cams;
     let device_id = config.settings.device_id;
     let zone_id_list = config.settings.zone_id_list;
     let monitor_id_list = config.settings.monitor_id_list;
 
-    println!("Loaded config: size = {size}, brightness = {brightness}");
+    println!("Loaded config: size = {size}, brightness = {brightness}, delay = {delay_ms}ms");
     if args.paused {
         println!("Starting in PAUSED state.");
     }
@@ -440,7 +442,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         tokio::runtime::Handle::current()
                             .block_on(send_data(&zone, &res))
                             .expect("Failed to send data");
-                        std::thread::sleep(time::Duration::from_millis(95));
+                        std::thread::sleep(time::Duration::from_millis(delay_ms));
                     }
                 })
                 .await

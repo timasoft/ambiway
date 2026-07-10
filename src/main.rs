@@ -9,6 +9,7 @@ use openrgb2::{OpenRgbClient, Zone};
 use rgb::RGB8;
 use serde::Deserialize;
 use std::{
+    fmt::Display,
     fs,
     path::PathBuf,
     sync::{
@@ -18,9 +19,12 @@ use std::{
     time,
 };
 use tokio::{
+    io::AsyncWriteExt,
     runtime::Builder,
     signal::unix::{SignalKind, signal},
+    sync::Mutex,
 };
+use tokio_serial::SerialStream;
 use xrandr::XHandle;
 
 /// Ambilight with OpenRGB
@@ -41,6 +45,46 @@ struct Config {
     led: Led,
     indent: Indent,
     settings: Settings,
+    serial: Option<SerialConfig>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum Protocol {
+    #[default]
+    Awa,
+    Adalight,
+}
+
+impl Protocol {
+    fn header(self) -> &'static [u8; 3] {
+        match self {
+            Protocol::Awa => b"Awa",
+            Protocol::Adalight => b"Ada",
+        }
+    }
+}
+
+impl Display for Protocol {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Protocol::Awa => write!(f, "awa"),
+            Protocol::Adalight => write!(f, "adalight"),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct SerialConfig {
+    port: String,
+    #[serde(default = "default_serial_baud")]
+    baud_rate: u32,
+    #[serde(default)]
+    protocol: Protocol,
+}
+
+fn default_serial_baud() -> u32 {
+    2_000_000
 }
 
 #[derive(Debug, Deserialize)]
@@ -333,6 +377,114 @@ async fn send_data<'a>(
     Ok(())
 }
 
+fn prepare_serial_frame(colors: &[[u8; 3]], header: &[u8; 3]) -> Vec<u8> {
+    let num_leds = colors.len();
+    let count = num_leds.wrapping_sub(1);
+    let hi = (count >> 8) as u8;
+    let lo = count as u8;
+    let checksum = hi ^ lo ^ 0x55;
+
+    let mut buffer = Vec::with_capacity(6 + num_leds * 3 + 3);
+
+    buffer.extend_from_slice(header);
+    buffer.push(hi);
+    buffer.push(lo);
+    buffer.push(checksum);
+
+    for color in colors {
+        buffer.extend_from_slice(color);
+    }
+
+    let mut f1: u16 = 0;
+    let mut f2: u16 = 0;
+    let mut fext: u16 = 0;
+    for (pos, &byte) in buffer[6..].iter().enumerate() {
+        f1 = (f1 + byte as u16) % 255;
+        f2 = (f2 + f1) % 255;
+        fext = (fext + (byte as u16 ^ (pos & 0xff) as u16)) % 255;
+    }
+    if fext == 0x41 {
+        fext = 0xaa;
+    }
+    buffer.push(f1 as u8);
+    buffer.push(f2 as u8);
+    buffer.push(fext as u8);
+
+    buffer
+}
+
+async fn send_frame(
+    port: &mut SerialStream,
+    colors: &[[u8; 3]],
+    header: &[u8; 3],
+) -> Result<(), Box<dyn std::error::Error>> {
+    // 3-byte handshake prefix (triggers HyperHDR/Rp2040 handshake)
+    port.write_all(&[0x00, 0x00, 0x00]).await?;
+
+    let buffer = prepare_serial_frame(colors, header);
+    port.write_all(&buffer).await?;
+    port.flush().await?;
+
+    Ok(())
+}
+
+fn open_camera(cam: i32) -> VideoCapture {
+    let cap = VideoCapture::new(cam, videoio::CAP_V4L2).expect("Failed to open camera");
+    if !cap
+        .is_opened()
+        .expect("Failed to check if camera is opened")
+    {
+        eprintln!("Can't open camera {cam}");
+    }
+    cap
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_camera_task(
+    cam: i32,
+    region: Vec<[i32; 4]>,
+    brightness: f32,
+    smooth: bool,
+    delay_ms: u64,
+    manual_pause: Arc<AtomicBool>,
+    screen_off: Arc<AtomicBool>,
+    mut on_frame: impl FnMut(&[[u8; 3]]),
+) {
+    let mut cap = open_camera(cam);
+    let mut avg_colors = Vec::new();
+    let mut is_paused = manual_pause.load(Ordering::Relaxed) || screen_off.load(Ordering::Relaxed);
+
+    if is_paused {
+        let black = vec![[0u8; 3]; region.len()];
+        on_frame(&black);
+    }
+
+    loop {
+        let currently_paused =
+            manual_pause.load(Ordering::Relaxed) || screen_off.load(Ordering::Relaxed);
+
+        if currently_paused && !is_paused {
+            let black = vec![[0u8; 3]; region.len()];
+            on_frame(&black);
+            is_paused = true;
+        } else if !currently_paused && is_paused {
+            is_paused = false;
+        }
+
+        if currently_paused {
+            std::thread::sleep(time::Duration::from_millis(100));
+            continue;
+        }
+
+        let prev = &avg_colors;
+        let res =
+            get_average_colors(&region, &mut cap, prev, brightness, smooth).unwrap_or_default();
+        avg_colors = res.clone();
+        on_frame(&res);
+        std::thread::sleep(time::Duration::from_millis(delay_ms));
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
@@ -426,76 +578,120 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
 
         let mut handles = Vec::with_capacity(cams.len());
-        let client = OpenRgbClient::connect().await.unwrap();
-        for (i, &cam) in cams.iter().enumerate() {
-            let region = region_list[i].clone();
-            let brightness = brightness;
-            let controller = client.get_controller(device_id).await.unwrap();
-            let zone_id = zone_id_list[i];
 
-            let manual_pause_clone = manual_pause.clone();
-            let screen_off_clone = screen_off.clone();
+        if let Some(ref serial_cfg) = config.serial {
+            println!(
+                "Using serial port: {} at {} baud",
+                serial_cfg.port, serial_cfg.baud_rate
+            );
 
-            handles.push(tokio::spawn(async move {
-                tokio::task::spawn_blocking(move || {
-                    let zone = controller.get_zone(zone_id).unwrap();
-                    let mut cap =
-                        VideoCapture::new(cam, videoio::CAP_V4L2).expect("Failed to open camera");
-                    if !cap
-                        .is_opened()
-                        .expect("Failed to check if camera is opened")
-                    {
-                        eprintln!("Can't open camera {cam}");
-                        return;
-                    }
-                    let mut avg_colors = Vec::new();
-                    let mut is_paused = manual_pause_clone.load(Ordering::Relaxed)
-                        || screen_off_clone.load(Ordering::Relaxed);
+            let port =
+                SerialStream::open(&tokio_serial::new(&serial_cfg.port, serial_cfg.baud_rate))
+                    .expect("Failed to open serial port");
+            let port = Arc::new(Mutex::new(port));
 
-                    // If started paused, turn off LEDs immediately
-                    if is_paused {
-                        let black = vec![[0, 0, 0]; region.len()];
-                        tokio::runtime::Handle::current()
-                            .block_on(send_data(&zone, black.as_slice()))
-                            .expect("Failed to send data");
-                    }
-
-                    loop {
-                        let currently_paused = manual_pause_clone.load(Ordering::Relaxed)
-                            || screen_off_clone.load(Ordering::Relaxed);
-
-                        // Handle state transitions
-                        if currently_paused && !is_paused {
-                            // Just paused -> turn off LEDs
-                            let black = vec![[0, 0, 0]; region.len()];
-                            tokio::runtime::Handle::current()
-                                .block_on(send_data(&zone, black.as_slice()))
-                                .expect("Failed to send data");
-                            is_paused = true;
-                        } else if !currently_paused && is_paused {
-                            // Just unpaused
-                            is_paused = false;
-                        }
-
-                        // Skip heavy processing if paused
-                        if currently_paused {
-                            std::thread::sleep(time::Duration::from_millis(100));
-                            continue;
-                        }
-
-                        let prev = &avg_colors;
-                        let res = get_average_colors(&region, &mut cap, prev, brightness, smooth)
-                            .unwrap_or_default();
-                        avg_colors = res.clone();
-                        tokio::runtime::Handle::current()
-                            .block_on(send_data(&zone, &res))
-                            .expect("Failed to send data");
-                        std::thread::sleep(time::Duration::from_millis(delay_ms));
-                    }
+            let total_leds: usize = region_list.iter().map(|r| r.len()).sum();
+            let led_counts: Vec<usize> = region_list.iter().map(|r| r.len()).collect();
+            let led_offsets: Vec<usize> = led_counts
+                .iter()
+                .scan(0, |acc, &x| {
+                    let start = *acc;
+                    *acc += x;
+                    Some(start)
                 })
-                .await
-                .unwrap();
+                .collect();
+
+            let header = serial_cfg.protocol.header();
+            println!(
+                "Using protocol: {} ({:02x} {:02x} {:02x})",
+                serial_cfg.protocol, header[0], header[1], header[2]
+            );
+
+            let shared_colors: Arc<Mutex<Vec<[u8; 3]>>> =
+                Arc::new(Mutex::new(vec![[0u8; 3]; total_leds]));
+
+            let port_clone = port.clone();
+            let colors_clone = shared_colors.clone();
+            let pause_clone = manual_pause.clone();
+            let off_clone = screen_off.clone();
+            let total = total_leds;
+            handles.push(tokio::spawn(async move {
+                loop {
+                    let is_paused =
+                        pause_clone.load(Ordering::Relaxed) || off_clone.load(Ordering::Relaxed);
+
+                    let colors = if is_paused {
+                        vec![[0u8; 3]; total]
+                    } else {
+                        colors_clone.lock().await.clone()
+                    };
+
+                    let mut port = port_clone.lock().await;
+                    if let Err(e) = send_frame(&mut port, &colors, header).await {
+                        eprintln!("Serial send error: {e}");
+                    }
+                    drop(port);
+
+                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                }
             }));
+
+            for (i, &cam) in cams.iter().enumerate() {
+                let region = region_list[i].clone();
+                let offset = led_offsets[i];
+                let colors_out = shared_colors.clone();
+                let mp = manual_pause.clone();
+                let so = screen_off.clone();
+
+                handles.push(tokio::spawn(async move {
+                    tokio::task::spawn_blocking(move || {
+                        run_camera_task(cam, region, brightness, smooth, delay_ms, mp, so, {
+                            let colors_out = colors_out.clone();
+                            move |frame| {
+                                let mut colors = colors_out.blocking_lock();
+                                if !frame.is_empty() {
+                                    colors[offset..offset + frame.len()].copy_from_slice(frame);
+                                }
+                            }
+                        });
+                    })
+                    .await
+                    .unwrap();
+                }));
+            }
+        } else {
+            let client = OpenRgbClient::connect().await.unwrap();
+            for (i, &cam) in cams.iter().enumerate() {
+                let region = region_list[i].clone();
+                let brightness = brightness;
+                let controller = client.get_controller(device_id).await.unwrap();
+                let zone_id = zone_id_list[i];
+
+                let manual_pause_clone = manual_pause.clone();
+                let screen_off_clone = screen_off.clone();
+
+                handles.push(tokio::spawn(async move {
+                    tokio::task::spawn_blocking(move || {
+                        let zone = controller.get_zone(zone_id).unwrap();
+                        run_camera_task(
+                            cam,
+                            region,
+                            brightness,
+                            smooth,
+                            delay_ms,
+                            manual_pause_clone,
+                            screen_off_clone,
+                            |frame| {
+                                tokio::runtime::Handle::current()
+                                    .block_on(send_data(&zone, frame))
+                                    .expect("Failed to send data");
+                            },
+                        );
+                    })
+                    .await
+                    .unwrap();
+                }));
+            }
         }
 
         for h in handles {

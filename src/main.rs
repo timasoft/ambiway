@@ -21,11 +21,14 @@ use std::{
 use tokio::{
     io::AsyncWriteExt,
     runtime::Builder,
+    select,
     signal::unix::{SignalKind, signal},
     sync::Mutex,
 };
 use tokio_serial::SerialStream;
 use xrandr::XHandle;
+
+const SHUTDOWN_BLACK_REPEATS: u32 = 5;
 
 /// Ambilight with OpenRGB
 #[derive(Parser, Debug)]
@@ -448,6 +451,7 @@ fn run_camera_task(
     delay_ms: u64,
     manual_pause: Arc<AtomicBool>,
     screen_off: Arc<AtomicBool>,
+    shutdown: Arc<AtomicBool>,
     mut on_frame: impl FnMut(&[[u8; 3]]),
 ) {
     let mut cap = open_camera(cam);
@@ -459,7 +463,7 @@ fn run_camera_task(
         on_frame(&black);
     }
 
-    loop {
+    while !shutdown.load(Ordering::Relaxed) {
         let currently_paused =
             manual_pause.load(Ordering::Relaxed) || screen_off.load(Ordering::Relaxed);
 
@@ -512,6 +516,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let manual_pause = Arc::new(AtomicBool::new(args.paused));
     let screen_off = Arc::new(AtomicBool::new(false));
+    let shutdown = Arc::new(AtomicBool::new(false));
 
     let monitors = get_monitors_info(monitor_id_list)?;
 
@@ -551,6 +556,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 paused_signal.store(!current, Ordering::Relaxed);
                 println!("[Signal] Pause toggled. New state: {}", !current);
             }
+        });
+
+        // Spawn a task to listen for SIGTERM/SIGINT to shutdown
+        let shutdown_signal = shutdown.clone();
+        tokio::spawn(async move {
+            let mut sigterm =
+                signal(SignalKind::terminate()).expect("Failed to listen for SIGTERM");
+            let mut sigint = signal(SignalKind::interrupt()).expect("Failed to listen for SIGINT");
+            let sig = select! {
+                _ = sigterm.recv() => "SIGTERM",
+                _ = sigint.recv() => "SIGINT",
+            };
+            println!("[Signal] {sig} received, shutting down...");
+            shutdown_signal.store(true, Ordering::Relaxed);
         });
 
         // Spawn a task to poll DRM DPMS state automatically
@@ -614,9 +633,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let colors_clone = shared_colors.clone();
             let pause_clone = manual_pause.clone();
             let off_clone = screen_off.clone();
+            let sd = shutdown.clone();
             let total = total_leds;
             handles.push(tokio::spawn(async move {
                 loop {
+                    if sd.load(Ordering::Relaxed) {
+                        let black = vec![[0u8; 3]; total];
+                        let mut port = port_clone.lock().await;
+                        for _ in 0..SHUTDOWN_BLACK_REPEATS {
+                            let _ = send_frame(&mut port, &black, header).await;
+                        }
+                        break;
+                    }
+
                     let is_paused =
                         pause_clone.load(Ordering::Relaxed) || off_clone.load(Ordering::Relaxed);
 
@@ -642,10 +671,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let colors_out = shared_colors.clone();
                 let mp = manual_pause.clone();
                 let so = screen_off.clone();
+                let sd = shutdown.clone();
 
                 handles.push(tokio::spawn(async move {
                     tokio::task::spawn_blocking(move || {
-                        run_camera_task(cam, region, brightness, smooth, delay_ms, mp, so, {
+                        run_camera_task(cam, region, brightness, smooth, delay_ms, mp, so, sd, {
                             let colors_out = colors_out.clone();
                             move |frame| {
                                 let mut colors = colors_out.blocking_lock();
@@ -669,6 +699,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 let manual_pause_clone = manual_pause.clone();
                 let screen_off_clone = screen_off.clone();
+                let sd = shutdown.clone();
 
                 handles.push(tokio::spawn(async move {
                     tokio::task::spawn_blocking(move || {
@@ -681,6 +712,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             delay_ms,
                             manual_pause_clone,
                             screen_off_clone,
+                            sd,
                             |frame| {
                                 tokio::runtime::Handle::current()
                                     .block_on(send_data(&zone, frame))
@@ -692,6 +724,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .unwrap();
                 }));
             }
+        }
+
+        if shutdown.load(Ordering::Relaxed) {
+            if config.serial.is_none()
+                && let Ok(client) = OpenRgbClient::connect().await
+                && let Ok(controller) = client.get_controller(device_id).await
+            {
+                for _ in 0..SHUTDOWN_BLACK_REPEATS {
+                    for &zone_id in &zone_id_list {
+                        if let Ok(zone) = controller.get_zone(zone_id) {
+                            let _ = zone.set_all_leds(RGB8::new(0, 0, 0)).await;
+                        }
+                    }
+                }
+            }
+            println!("Shutdown complete.");
         }
 
         for h in handles {

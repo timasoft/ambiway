@@ -10,7 +10,7 @@ opencv = { version = "0.100.1", default-features = false, features = [
     "clang-runtime",
     "videoio",
 ] }
-openrgb2 = "0.3.0"
+openrgb2 = "0.4.1"
 rgb = "0.8.53"
 serde = { version = "1.0.228", features = ["derive"] }
 tokio = {"version" = "1.52.3", features = ["full"]}
